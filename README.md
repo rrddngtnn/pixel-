@@ -38,7 +38,7 @@ python app.py
 - 一键「扫描链接」，结果按账户分组列出
 - 每条链接支持「复制」和「在默认浏览器打开」
 - 「准备 Chrome」会在手机端打开 Chrome 并自动点已有账号授权，再刷新网页登录 token
-- 每条 partner 链接支持「自动领取」，会在本机 Chromium 注入登录 Cookie 后打开
+- 每条 offer 链接支持「自动领取」，会在本机 Chrome 注入登录 Cookie、把页面缩放到 50% 后打开
 - 勾选 **匹配所有 one.google.com 链接** 可以放宽匹配
 
 ## 使用方式二：命令行
@@ -84,16 +84,48 @@ https://one.google.com/offer/YYYY?source=...
 
 ## 自动领取
 
-Web UI 的「刷新 tokens」会做两件事：
+Web UI 里推荐按这个顺序用：
 
-1. 从手机 root 数据库里读取 Google 账号信息、Android ID 和 Chrome 已缓存的
+1. 点「准备 Chrome」。
+   脚本会在手机端打开 Chrome，自动点击已有账号登录/同意/继续按钮，然后刷新 token。
+2. 点「扫描链接」。
+   扫描到的 `partner-eft-onboard/...` 链接会统一转换为
+   `https://one.google.com/offer/...`。
+3. 点目标链接右侧的「自动领取」。
+   后台会启动 `auto_claim.py`，前端左侧会实时显示中文日志。
+
+「刷新 tokens」会从手机 root 数据库里读取 Google 账号信息、Android ID 和 Chrome 已缓存的
    `OAuthLogin` token。
-2. 如果没有 OAuthLogin token，先点「准备 Chrome」：脚本会在手机端打开 Chrome，
-   自动点击常见的已有账号登录/同意/继续按钮，然后再刷新 token。
 
 手机需要保持解锁。遇到验证码、密码、异常安全提示时不会处理，需要手动接管。
-拿到 token 后，电脑端会用它换取 Google 网页 Cookie，并由「自动领取」在本机
-Chromium 里打开优惠链接。
+
+「自动领取」的实际流程：
+
+1. 如果 `.tokens.json` 超过 45 分钟，会先自动从手机重新刷新 token。
+2. 用手机里的 `OAuthLogin` token 换取 Google 网页 Cookie。
+3. 启动本机系统 Chrome 的隔离上下文，注入 Cookie。
+4. 只打开原始优惠链接，不跳其他中转页。
+5. 到达 `one.google.com/offer/...` 后，使用真实 Chrome 浏览器缩放把页面调到 50%。
+   这是系统级 `Ctrl + 鼠标滚轮向下`，效果和手动点地址栏右侧缩放菜单一致。
+6. 等 Google One 核心 UI 出现后注入修复脚本，处理
+   `window.default_SubscriptionsManagementUi` 和 `[jscontroller="ytxTId"]`。
+7. 如果勾选了「自动点领取」，会尝试点击 `Start trial` / `Accept` / `Claim` /
+   `Continue` / `Subscribe` 等按钮；否则保持 Chrome 打开，手动点。
+
+命令行也可以直接跑：
+
+```powershell
+python auto_claim.py --url "https://one.google.com/offer/XXXX"
+
+# 指定设备，并在 token 过期时自动刷新、badauth 时重试一次
+python auto_claim.py --url "https://one.google.com/offer/XXXX" --serial 1A2B3C4D --refresh-stale-tokens --retry-badauth
+
+# 尝试自动点击领取按钮
+python auto_claim.py --url "https://one.google.com/offer/XXXX" --auto-click
+```
+
+注意：50% 缩放依赖 Windows 系统级输入，所以只在可见 Chrome 窗口里执行；
+`--headless` 模式会跳过这个缩放步骤。自动领取启动时不要立刻把 Chrome 最小化。
 
 ## 原理
 
@@ -117,4 +149,10 @@ value 是 protobuf 序列化的字节。默认快扫做两步：
 （部分机型上是 `com.google.android.apps.subscriptions.red`）。
 - **没匹配到链接**：可能缓存还没下发。在 App 里点一下「优惠 / Offers」
 页刷一次，再跑脚本；或用 `--all-urls` 看看里面都有什么。
-
+- **`OAuthLogin returned HTTP 403 / badauth`**：手机里的 OAuthLogin token 过期。
+  Web UI 自动领取会先刷新旧 token，遇到 `badauth` 也会重试一次；如果仍失败，
+  再点一次「准备 Chrome」，让手机端 Chrome 完成账号授权。
+- **自动领取跳到 Google 登录页**：说明 Cookie 没被 Google One 接受。通常是 token
+  太旧、手机 Chrome 授权没完成，或选错了设备/账号。先「准备 Chrome」，再重新点自动领取。
+- **优惠页看不全**：正常流程会在打开优惠页后把 Chrome 真实缩放到 50%。如果没有变成 50%，
+  保持自动化 Chrome 在前台重试；临时手动方案是在 Chrome 里按 `Ctrl` + 鼠标滚轮向下调到 50%。

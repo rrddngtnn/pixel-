@@ -49,13 +49,29 @@ CLAIM_BUTTON_SELECTORS = [
     'button:has-text("Redeem")',
     'button:has-text("Get started")',
     'button:has-text("Activate")',
+    'button:has-text("Continue")',
+    'button:has-text("Next")',
+    'button:has-text("Subscribe")',
+    'button:has-text("Start trial")',
+    'button:has-text("Try it")',
+    'button:has-text("Join")',
+    'button:has-text("Checkout")',
+    'button:has-text("Confirm")',
     'button:has-text("接受")',
     'button:has-text("领取")',
     'button:has-text("兑换")',
     'button:has-text("确认")',
+    'button:has-text("继续")',
+    'button:has-text("下一步")',
+    'button:has-text("订阅")',
+    'button:has-text("开始")',
+    'button:has-text("加入")',
     '[role="button"]:has-text("Accept")',
     '[role="button"]:has-text("Claim")',
     '[role="button"]:has-text("Redeem")',
+    '[role="button"]:has-text("Continue")',
+    '[role="button"]:has-text("Next")',
+    '[role="button"]:has-text("Subscribe")',
 ]
 
 
@@ -107,6 +123,60 @@ OFFER_UI_READY_SCRIPT = r"""
     nodes,
     url: location.href,
   };
+})()
+"""
+
+OFFER_ACTION_SCROLL_SCRIPT = r"""
+(() => {
+  const normalize = (s) => String(s || "").replace(/\s+/g, " ").trim();
+  const textOf = (el) => normalize(el.innerText || el.textContent || el.getAttribute("aria-label") || "");
+  const visible = (el) => {
+    const r = el.getBoundingClientRect();
+    const st = getComputedStyle(el);
+    return r.width > 4 && r.height > 4 && st.visibility !== "hidden" && st.display !== "none";
+  };
+  const keywords = [
+    "accept", "claim", "redeem", "get started", "continue", "next", "activate",
+    "start trial", "try it", "subscribe", "checkout", "confirm", "join",
+    "接受", "领取", "兑换", "开始", "继续", "下一步", "激活", "订阅", "确认", "加入"
+  ];
+  const candidates = Array.from(document.querySelectorAll(
+    'button,[role="button"],a[href],[tabindex]:not([tabindex="-1"])'
+  ))
+    .map((el) => ({ el, text: textOf(el), rect: el.getBoundingClientRect() }))
+    .filter((item) => item.text && visible(item.el))
+    .filter((item) => keywords.some((k) => item.text.toLowerCase().includes(k)));
+
+  let target = candidates.find((item) => item.rect.top > 120) || candidates[0];
+  let fallback = "";
+
+  if (!target) {
+    const priceLike = Array.from(document.querySelectorAll("div,span,p"))
+      .map((el) => ({ el, text: textOf(el), rect: el.getBoundingClientRect() }))
+      .filter((item) => item.text && visible(item.el) && /(\$|month|storage|个月|月份|月|TB)/i.test(item.text))
+      .sort((a, b) => b.rect.top - a.rect.top)
+      .find((item) => item.rect.top > window.innerHeight * 0.45);
+    if (priceLike) {
+      target = priceLike;
+      fallback = "price";
+    }
+  }
+
+  if (target) {
+    target.el.scrollIntoView({ block: "center", inline: "center" });
+    return {
+      ok: true,
+      text: normalize(target.text).slice(0, 120),
+      fallback,
+      scrollY: Math.round(window.scrollY),
+    };
+  }
+
+  const doc = document.documentElement;
+  const maxY = Math.max(doc.scrollHeight, document.body.scrollHeight) - window.innerHeight;
+  const y = Math.max(0, Math.round(maxY * 0.65));
+  window.scrollTo(0, y);
+  return { ok: false, reason: "no action candidate", scrollY: Math.round(window.scrollY), maxY };
 })()
 """
 
@@ -203,6 +273,7 @@ def try_auto_click(page, timeout_ms: int = 6000) -> tuple[bool, str]:
             if loc.count() == 0:
                 continue
             loc.wait_for(state="visible", timeout=timeout_ms)
+            loc.scroll_into_view_if_needed(timeout=timeout_ms)
             loc.click()
             try:
                 page.wait_for_load_state("networkidle", timeout=30000)
@@ -212,6 +283,14 @@ def try_auto_click(page, timeout_ms: int = 6000) -> tuple[bool, str]:
         except (PWTimeout, Exception):
             continue
     return False, ""
+
+
+def scroll_offer_action_into_view(page) -> dict:
+    try:
+        result = page.evaluate(OFFER_ACTION_SCROLL_SCRIPT)
+        return result if isinstance(result, dict) else {"ok": False, "result": result}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 def wait_for_offer_page_load(page, timeout_ms: int) -> dict:
@@ -462,6 +541,14 @@ def run(url: str, email: str | None, tokens_path: Path, headless: bool,
             errors = patch_result.get("errors") or []
             if errors:
                 print(f"[页面处理] Ig 调用异常：{errors[:3]}")
+            if is_offer_page_url(page.url):
+                scroll_detail = scroll_offer_action_into_view(page)
+                if scroll_detail.get("ok"):
+                    target = scroll_detail.get("text") or "页面操作区"
+                    print(f"[页面处理] 已滚动到可操作区域：{target}")
+                else:
+                    reason = scroll_detail.get("error") or scroll_detail.get("reason") or "未找到明确按钮，已尝试向下滚动"
+                    print(f"[页面处理] 滚动定位：{reason}")
         else:
             print(f"[页面处理] 未完成：{describe_patch_failure(patch_detail)}")
             if page.url.startswith("https://accounts.google.com/"):

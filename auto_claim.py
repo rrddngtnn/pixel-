@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -117,6 +118,9 @@ CHROME_ARGS = [
     "--no-first-run",
     "--no-default-browser-check",
 ]
+DEFAULT_CLAIM_VIEWPORT = "1600x900"
+DEFAULT_CLAIM_WINDOW_SIZE = "1600x1000"
+FIXED_DEVICE_SCALE_FACTOR = 1
 
 
 def cookies_to_playwright(detailed: list[dict]) -> list[dict]:
@@ -196,6 +200,31 @@ def wait_for_offer_page_load(page, timeout_ms: int) -> dict:
 
 def is_offer_page_url(current_url: str) -> bool:
     return any((current_url or "").startswith(prefix) for prefix in OFFER_URL_PREFIXES)
+
+
+def parse_browser_size(raw: str, option_name: str) -> dict[str, int]:
+    text = (raw or "").strip().lower().replace(",", "x")
+    if "x" not in text:
+        raise ValueError(f"{option_name} must use WIDTHxHEIGHT, got: {raw!r}")
+    width_text, height_text = text.split("x", 1)
+    try:
+        width = int(width_text)
+        height = int(height_text)
+    except ValueError as exc:
+        raise ValueError(f"{option_name} must use numeric WIDTHxHEIGHT, got: {raw!r}") from exc
+    if width < 800 or height < 600:
+        raise ValueError(f"{option_name} is too small; minimum is 800x600")
+    return {"width": width, "height": height}
+
+
+def build_chrome_args(window_size: dict[str, int]) -> list[str]:
+    return [
+        *CHROME_ARGS,
+        f"--window-size={window_size['width']},{window_size['height']}",
+        "--window-position=0,0",
+        "--high-dpi-support=1",
+        f"--force-device-scale-factor={FIXED_DEVICE_SCALE_FACTOR}",
+    ]
 
 
 def wait_for_offer_ui_ready(page, timeout_ms: int = 45000) -> tuple[bool, dict]:
@@ -291,10 +320,16 @@ def describe_patch_failure(detail: dict) -> str:
     return "；".join(parts)
 
 
-def launch_claim_context(p, headless: bool, use_system_chrome: bool):
+def launch_claim_context(
+    p,
+    headless: bool,
+    use_system_chrome: bool,
+    viewport: dict[str, int],
+    window_size: dict[str, int],
+):
     launch_kwargs = {
         "headless": headless,
-        "args": CHROME_ARGS,
+        "args": build_chrome_args(window_size),
     }
     try:
         if use_system_chrome:
@@ -311,7 +346,11 @@ def launch_claim_context(p, headless: bool, use_system_chrome: bool):
 
     context = browser.new_context(
         user_agent=UA_CHROME,
-        viewport={"width": 1280, "height": 900},
+        viewport=viewport,
+        screen=viewport,
+        device_scale_factor=FIXED_DEVICE_SCALE_FACTOR,
+        is_mobile=False,
+        has_touch=False,
         locale="en-US",
     )
     return browser, context, launched_with
@@ -319,7 +358,8 @@ def launch_claim_context(p, headless: bool, use_system_chrome: bool):
 
 def run(url: str, email: str | None, tokens_path: Path, headless: bool,
         auto_click: bool, keep_open: bool, timeout_s: int, use_system_chrome: bool,
-        no_prompt: bool = False) -> int:
+        no_prompt: bool = False, browser_viewport: dict[str, int] | None = None,
+        browser_window_size: dict[str, int] | None = None) -> int:
     if not tokens_path.exists():
         raise SystemExit(
             f"找不到 {tokens_path}。\n请先点击前端的「准备 Chrome」或「刷新 tokens」。"
@@ -341,14 +381,24 @@ def run(url: str, email: str | None, tokens_path: Path, headless: bool,
     pw_cookies = cookies_to_playwright(detailed)
     print(f"       -> 已生成 {len(pw_cookies)} 个浏览器 Cookie")
 
+    browser_viewport = browser_viewport or parse_browser_size(DEFAULT_CLAIM_VIEWPORT, "viewport")
+    browser_window_size = browser_window_size or parse_browser_size(DEFAULT_CLAIM_WINDOW_SIZE, "window-size")
+
     print("[2/4] 正在启动 Chromium 隔离上下文 ...")
     with sync_playwright() as p:
         browser, context, launched_with = launch_claim_context(
             p,
             headless=headless,
             use_system_chrome=use_system_chrome,
+            viewport=browser_viewport,
+            window_size=browser_window_size,
         )
         print(f"       -> 已启动：{launched_with}")
+        print(
+            "       -> 浏览器尺寸："
+            f"视口 {browser_viewport['width']}x{browser_viewport['height']}，"
+            f"窗口 {browser_window_size['width']}x{browser_window_size['height']}，DPI=1"
+        )
 
         print("[3/4] 正在注入 Cookie ...")
         context.add_cookies(pw_cookies)
@@ -448,7 +498,22 @@ def main() -> int:
     ap.add_argument("--timeout", type=int, default=60, help="page load timeout in seconds (default 60)")
     ap.add_argument("--bundled-chromium", action="store_true",
                     help="force Playwright's bundled Chromium even if system Chrome is available")
+    ap.add_argument(
+        "--viewport",
+        default=os.environ.get("AUTO_CLAIM_VIEWPORT", DEFAULT_CLAIM_VIEWPORT),
+        help=f"fixed page viewport as WIDTHxHEIGHT (default {DEFAULT_CLAIM_VIEWPORT})",
+    )
+    ap.add_argument(
+        "--window-size",
+        default=os.environ.get("AUTO_CLAIM_WINDOW_SIZE", DEFAULT_CLAIM_WINDOW_SIZE),
+        help=f"fixed Chrome outer window as WIDTHxHEIGHT (default {DEFAULT_CLAIM_WINDOW_SIZE})",
+    )
     args = ap.parse_args()
+    try:
+        browser_viewport = parse_browser_size(args.viewport, "--viewport")
+        browser_window_size = parse_browser_size(args.window_size, "--window-size")
+    except ValueError as exc:
+        ap.error(str(exc))
 
     return run(
         url=args.url,
@@ -460,6 +525,8 @@ def main() -> int:
         timeout_s=args.timeout,
         use_system_chrome=not args.bundled_chromium,
         no_prompt=args.no_prompt,
+        browser_viewport=browser_viewport,
+        browser_window_size=browser_window_size,
     )
 
 

@@ -127,7 +127,7 @@ OFFER_UI_READY_SCRIPT = r"""
 """
 
 OFFER_ACTION_SCROLL_SCRIPT = r"""
-(() => {
+(async () => {
   const normalize = (s) => String(s || "").replace(/\s+/g, " ").trim();
   const textOf = (el) => normalize(el.innerText || el.textContent || el.getAttribute("aria-label") || "");
   const visible = (el) => {
@@ -135,13 +135,65 @@ OFFER_ACTION_SCROLL_SCRIPT = r"""
     const st = getComputedStyle(el);
     return r.width > 4 && r.height > 4 && st.visibility !== "hidden" && st.display !== "none";
   };
+  const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+  const rectInfo = (el) => {
+    const r = el.getBoundingClientRect();
+    return {
+      top: Math.round(r.top),
+      bottom: Math.round(r.bottom),
+      left: Math.round(r.left),
+      right: Math.round(r.right),
+      width: Math.round(r.width),
+      height: Math.round(r.height),
+    };
+  };
+  const isScrollable = (el) => {
+    if (!el) return false;
+    const st = getComputedStyle(el);
+    return /(auto|scroll|overlay)/.test(`${st.overflow} ${st.overflowY}`)
+      && el.scrollHeight > el.clientHeight + 8;
+  };
+  const scrollParentOf = (el) => {
+    let cur = el.parentElement;
+    while (cur && cur !== document.body && cur !== document.documentElement) {
+      if (isScrollable(cur)) return cur;
+      cur = cur.parentElement;
+    }
+    return null;
+  };
+  const inViewOf = (el, scroller) => {
+    const r = el.getBoundingClientRect();
+    if (!scroller) {
+      return r.top >= 16 && r.bottom <= window.innerHeight - 16;
+    }
+    const cr = scroller.getBoundingClientRect();
+    return r.top >= cr.top + 16 && r.bottom <= cr.bottom - 16;
+  };
+  const scrollIntoContainer = async (el) => {
+    const scroller = scrollParentOf(el);
+    for (let i = 0; i < 5; i += 1) {
+      const r = el.getBoundingClientRect();
+      if (!scroller) {
+        const wanted = window.scrollY + r.top - Math.max(24, (window.innerHeight - r.height) / 2);
+        window.scrollTo(0, Math.max(0, wanted));
+      } else {
+        const cr = scroller.getBoundingClientRect();
+        const wanted = scroller.scrollTop + (r.top - cr.top) - Math.max(24, (scroller.clientHeight - r.height) / 2);
+        const max = scroller.scrollHeight - scroller.clientHeight;
+        scroller.scrollTop = Math.max(0, Math.min(max, wanted));
+      }
+      await frame();
+      if (inViewOf(el, scroller)) break;
+    }
+    return scroller;
+  };
   const keywords = [
     "accept", "claim", "redeem", "get started", "continue", "next", "activate",
     "start trial", "try it", "subscribe", "checkout", "confirm", "join",
     "接受", "领取", "兑换", "开始", "继续", "下一步", "激活", "订阅", "确认", "加入"
   ];
   const candidates = Array.from(document.querySelectorAll(
-    'button,[role="button"],a[href],[tabindex]:not([tabindex="-1"])'
+    'button,[role="button"],[tabindex]:not([tabindex="-1"])'
   ))
     .map((el) => ({ el, text: textOf(el), rect: el.getBoundingClientRect() }))
     .filter((item) => item.text && visible(item.el))
@@ -163,20 +215,25 @@ OFFER_ACTION_SCROLL_SCRIPT = r"""
   }
 
   if (target) {
-    target.el.scrollIntoView({ block: "center", inline: "center" });
+    const scroller = await scrollIntoContainer(target.el);
     return {
       ok: true,
       text: normalize(target.text).slice(0, 120),
       fallback,
-      scrollY: Math.round(window.scrollY),
+      inView: inViewOf(target.el, scroller),
+      targetRect: rectInfo(target.el),
+      scroller: scroller ? {
+        tag: scroller.tagName,
+        className: String(scroller.className || "").slice(0, 80),
+        scrollTop: Math.round(scroller.scrollTop),
+        clientHeight: Math.round(scroller.clientHeight),
+        scrollHeight: Math.round(scroller.scrollHeight),
+        rect: rectInfo(scroller),
+      } : null,
     };
   }
 
-  const doc = document.documentElement;
-  const maxY = Math.max(doc.scrollHeight, document.body.scrollHeight) - window.innerHeight;
-  const y = Math.max(0, Math.round(maxY * 0.65));
-  window.scrollTo(0, y);
-  return { ok: false, reason: "no action candidate", scrollY: Math.round(window.scrollY), maxY };
+  return { ok: false, reason: "no action candidate" };
 })()
 """
 
@@ -545,9 +602,10 @@ def run(url: str, email: str | None, tokens_path: Path, headless: bool,
                 scroll_detail = scroll_offer_action_into_view(page)
                 if scroll_detail.get("ok"):
                     target = scroll_detail.get("text") or "页面操作区"
-                    print(f"[页面处理] 已滚动到可操作区域：{target}")
+                    state = "已进入可视区" if scroll_detail.get("inView") else "仍未完全可见"
+                    print(f"[页面处理] 已定位领取按钮：{target}（{state}）")
                 else:
-                    reason = scroll_detail.get("error") or scroll_detail.get("reason") or "未找到明确按钮，已尝试向下滚动"
+                    reason = scroll_detail.get("error") or scroll_detail.get("reason") or "未找到明确按钮"
                     print(f"[页面处理] 滚动定位：{reason}")
         else:
             print(f"[页面处理] 未完成：{describe_patch_failure(patch_detail)}")

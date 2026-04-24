@@ -126,117 +126,6 @@ OFFER_UI_READY_SCRIPT = r"""
 })()
 """
 
-OFFER_ACTION_SCROLL_SCRIPT = r"""
-(async () => {
-  const normalize = (s) => String(s || "").replace(/\s+/g, " ").trim();
-  const textOf = (el) => normalize(el.innerText || el.textContent || el.getAttribute("aria-label") || "");
-  const visible = (el) => {
-    const r = el.getBoundingClientRect();
-    const st = getComputedStyle(el);
-    return r.width > 4 && r.height > 4 && st.visibility !== "hidden" && st.display !== "none";
-  };
-  const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
-  const rectInfo = (el) => {
-    const r = el.getBoundingClientRect();
-    return {
-      top: Math.round(r.top),
-      bottom: Math.round(r.bottom),
-      left: Math.round(r.left),
-      right: Math.round(r.right),
-      width: Math.round(r.width),
-      height: Math.round(r.height),
-    };
-  };
-  const isScrollable = (el) => {
-    if (!el) return false;
-    const st = getComputedStyle(el);
-    return /(auto|scroll|overlay)/.test(`${st.overflow} ${st.overflowY}`)
-      && el.scrollHeight > el.clientHeight + 8;
-  };
-  const scrollParentOf = (el) => {
-    let cur = el.parentElement;
-    while (cur && cur !== document.body && cur !== document.documentElement) {
-      if (isScrollable(cur)) return cur;
-      cur = cur.parentElement;
-    }
-    return null;
-  };
-  const inViewOf = (el, scroller) => {
-    const r = el.getBoundingClientRect();
-    if (!scroller) {
-      return r.top >= 16 && r.bottom <= window.innerHeight - 16;
-    }
-    const cr = scroller.getBoundingClientRect();
-    return r.top >= cr.top + 16 && r.bottom <= cr.bottom - 16;
-  };
-  const scrollIntoContainer = async (el) => {
-    const scroller = scrollParentOf(el);
-    for (let i = 0; i < 5; i += 1) {
-      const r = el.getBoundingClientRect();
-      if (!scroller) {
-        const wanted = window.scrollY + r.top - Math.max(24, (window.innerHeight - r.height) / 2);
-        window.scrollTo(0, Math.max(0, wanted));
-      } else {
-        const cr = scroller.getBoundingClientRect();
-        const wanted = scroller.scrollTop + (r.top - cr.top) - Math.max(24, (scroller.clientHeight - r.height) / 2);
-        const max = scroller.scrollHeight - scroller.clientHeight;
-        scroller.scrollTop = Math.max(0, Math.min(max, wanted));
-      }
-      await frame();
-      if (inViewOf(el, scroller)) break;
-    }
-    return scroller;
-  };
-  const keywords = [
-    "accept", "claim", "redeem", "get started", "continue", "next", "activate",
-    "start trial", "try it", "subscribe", "checkout", "confirm", "join",
-    "接受", "领取", "兑换", "开始", "继续", "下一步", "激活", "订阅", "确认", "加入"
-  ];
-  const candidates = Array.from(document.querySelectorAll(
-    'button,[role="button"],[tabindex]:not([tabindex="-1"])'
-  ))
-    .map((el) => ({ el, text: textOf(el), rect: el.getBoundingClientRect() }))
-    .filter((item) => item.text && visible(item.el))
-    .filter((item) => keywords.some((k) => item.text.toLowerCase().includes(k)));
-
-  let target = candidates.find((item) => item.rect.top > 120) || candidates[0];
-  let fallback = "";
-
-  if (!target) {
-    const priceLike = Array.from(document.querySelectorAll("div,span,p"))
-      .map((el) => ({ el, text: textOf(el), rect: el.getBoundingClientRect() }))
-      .filter((item) => item.text && visible(item.el) && /(\$|month|storage|个月|月份|月|TB)/i.test(item.text))
-      .sort((a, b) => b.rect.top - a.rect.top)
-      .find((item) => item.rect.top > window.innerHeight * 0.45);
-    if (priceLike) {
-      target = priceLike;
-      fallback = "price";
-    }
-  }
-
-  if (target) {
-    const scroller = await scrollIntoContainer(target.el);
-    return {
-      ok: true,
-      text: normalize(target.text).slice(0, 120),
-      fallback,
-      inView: inViewOf(target.el, scroller),
-      targetRect: rectInfo(target.el),
-      scroller: scroller ? {
-        tag: scroller.tagName,
-        className: String(scroller.className || "").slice(0, 80),
-        scrollTop: Math.round(scroller.scrollTop),
-        clientHeight: Math.round(scroller.clientHeight),
-        scrollHeight: Math.round(scroller.scrollHeight),
-        rect: rectInfo(scroller),
-      } : null,
-    };
-  }
-
-  return { ok: false, reason: "no action candidate" };
-})()
-"""
-
 OFFER_URL_PREFIXES = (
     "https://one.google.com/offer/",
     "https://one.google.com/partner-eft-onboard/",
@@ -342,12 +231,100 @@ def try_auto_click(page, timeout_ms: int = 6000) -> tuple[bool, str]:
     return False, ""
 
 
-def scroll_offer_action_into_view(page) -> dict:
+def set_chrome_zoom_50(page, headless: bool) -> tuple[bool, str]:
+    """Use real Chrome browser zoom (Ctrl + wheel) so the toolbar shows 50%."""
+    if headless:
+        return False, "headless 模式跳过浏览器缩放"
+    if sys.platform != "win32":
+        return False, "当前系统不是 Windows，跳过浏览器缩放"
+
     try:
-        result = page.evaluate(OFFER_ACTION_SCROLL_SCRIPT)
-        return result if isinstance(result, dict) else {"ok": False, "result": result}
+        import ctypes
+
+        input_mouse = 0
+        input_keyboard = 1
+        keyeventf_keyup = 0x0002
+        mouseeventf_wheel = 0x0800
+        vk_control = 0x11
+
+        class MouseInput(ctypes.Structure):
+            _fields_ = [
+                ("dx", ctypes.c_long),
+                ("dy", ctypes.c_long),
+                ("mouseData", ctypes.c_ulong),
+                ("dwFlags", ctypes.c_ulong),
+                ("time", ctypes.c_ulong),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+            ]
+
+        class KeyboardInput(ctypes.Structure):
+            _fields_ = [
+                ("wVk", ctypes.c_ushort),
+                ("wScan", ctypes.c_ushort),
+                ("dwFlags", ctypes.c_ulong),
+                ("time", ctypes.c_ulong),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+            ]
+
+        class InputUnion(ctypes.Union):
+            _fields_ = [("mi", MouseInput), ("ki", KeyboardInput)]
+
+        class Input(ctypes.Structure):
+            _fields_ = [("type", ctypes.c_ulong), ("union", InputUnion)]
+
+        def send_key(vk: int, keyup: bool = False) -> None:
+            extra = ctypes.c_ulong(0)
+            event = Input(
+                type=input_keyboard,
+                union=InputUnion(
+                    ki=KeyboardInput(
+                        vk,
+                        0,
+                        keyeventf_keyup if keyup else 0,
+                        0,
+                        ctypes.pointer(extra),
+                    )
+                ),
+            )
+            ctypes.windll.user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(event))
+
+        def send_wheel(delta: int) -> None:
+            extra = ctypes.c_ulong(0)
+            event = Input(
+                type=input_mouse,
+                union=InputUnion(
+                    mi=MouseInput(
+                        0,
+                        0,
+                        ctypes.c_ulong(delta & 0xFFFFFFFF).value,
+                        mouseeventf_wheel,
+                        0,
+                        ctypes.pointer(extra),
+                    )
+                ),
+            )
+            ctypes.windll.user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(event))
+
+        page.bring_to_front()
+        page.mouse.move(480, 360)
+        page.wait_for_timeout(600)
+
+        send_key(vk_control)
+        try:
+            for _ in range(5):
+                send_wheel(-120)
+                page.wait_for_timeout(90)
+        finally:
+            send_key(vk_control, keyup=True)
+
+        page.wait_for_timeout(600)
+        dpr = page.evaluate("window.devicePixelRatio")
+        zoom = round(float(dpr) * 100)
+        if 45 <= zoom <= 55:
+            return True, f"Chrome 缩放已到约 {zoom}%"
+        return False, f"已发送缩放操作，但检测到约 {zoom}%"
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return False, str(e)
 
 
 def wait_for_offer_page_load(page, timeout_ms: int) -> dict:
@@ -589,7 +566,12 @@ def run(url: str, email: str | None, tokens_path: Path, headless: bool,
             browser.close()
             return 4
         else:
-            print("\n[页面处理] 已到优惠链接，等待页面加载完毕和核心 UI 出现后，注入 JS ...")
+            print("\n[页面处理] 已到优惠链接，先设置 Chrome 浏览器缩放到 50%，再等待页面 UI 并注入 JS ...")
+            zoom_ok, zoom_msg = set_chrome_zoom_50(page, headless=headless)
+            if zoom_ok:
+                print(f"[页面处理] {zoom_msg}")
+            else:
+                print(f"[页面处理] 浏览器缩放未确认：{zoom_msg}")
             ok, patch_detail = apply_offer_page_patch(page)
 
         if ok:
@@ -598,15 +580,6 @@ def run(url: str, email: str | None, tokens_path: Path, headless: bool,
             errors = patch_result.get("errors") or []
             if errors:
                 print(f"[页面处理] Ig 调用异常：{errors[:3]}")
-            if is_offer_page_url(page.url):
-                scroll_detail = scroll_offer_action_into_view(page)
-                if scroll_detail.get("ok"):
-                    target = scroll_detail.get("text") or "页面操作区"
-                    state = "已进入可视区" if scroll_detail.get("inView") else "仍未完全可见"
-                    print(f"[页面处理] 已定位领取按钮：{target}（{state}）")
-                else:
-                    reason = scroll_detail.get("error") or scroll_detail.get("reason") or "未找到明确按钮"
-                    print(f"[页面处理] 滚动定位：{reason}")
         else:
             print(f"[页面处理] 未完成：{describe_patch_failure(patch_detail)}")
             if page.url.startswith("https://accounts.google.com/"):

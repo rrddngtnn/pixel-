@@ -1,0 +1,12 @@
+.settings.json
+.tokens.json
+.auto_claim_logs/
+.claim_chrome_profiles/
+.cookies/
+__pycache__/
+*.pyc
+.venv/
+venv/
+dbs/
+oauth_helper/build/
+oauth_helper/__pycache__/

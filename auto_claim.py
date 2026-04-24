@@ -1,0 +1,467 @@
+"""
+Auto-claim a Google One partner-offer URL:
+
+    1. Read OAuthLogin token from .tokens.json (produced by extract_tokens.py)
+    2. Mint fresh google.com cookies (reuses google_auth.mint_cookies)
+    3. Launch Chromium, inject cookies, open the Google One offer URL
+    4. Patch the loaded Google One offer UI
+    5. Optionally try to click the "Accept / Claim" button
+
+Prereq (one-time):
+    pip install -r requirements.txt
+    playwright install chromium
+
+Typical usage:
+    # already have fresh .tokens.json
+    python auto_claim.py --url "https://one.google.com/offer/XXXXX"
+
+    # try to click the Accept button too (pages vary; may need tuning)
+    python auto_claim.py --url "..." --auto-click
+
+    # run completely in background:
+    python auto_claim.py --url "..." --headless --auto-click
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+
+try:
+    from playwright.sync_api import TimeoutError as PWTimeout, sync_playwright
+except ImportError:
+    sys.exit(
+        "Playwright not installed.\n"
+        "Run:\n  pip install -r requirements.txt\n  playwright install chromium"
+    )
+
+from google_auth import AuthError, UA_CHROME, mint_cookies
+
+
+CLAIM_BUTTON_SELECTORS = [
+    'button:has-text("Accept")',
+    'button:has-text("Claim")',
+    'button:has-text("Redeem")',
+    'button:has-text("Get started")',
+    'button:has-text("Activate")',
+    'button:has-text("接受")',
+    'button:has-text("领取")',
+    'button:has-text("兑换")',
+    'button:has-text("确认")',
+    '[role="button"]:has-text("Accept")',
+    '[role="button"]:has-text("Claim")',
+    '[role="button"]:has-text("Redeem")',
+]
+
+
+OFFER_PAGE_PATCH = r"""
+(() => {
+  const completion = typeof window.completion === "function"
+    ? window.completion.bind(window)
+    : () => {};
+  const t = window.default_SubscriptionsManagementUi;
+  if (!t) return { ok: false, reason: "default_SubscriptionsManagementUi missing" };
+  if (typeof t.sxa !== "function") return { ok: false, reason: "sxa missing" };
+  if (typeof t.Ig !== "function") return { ok: false, reason: "Ig missing" };
+
+  const orig = t.sxa;
+  t.sxa = function (arg) {
+    if (arg === null) return null;
+    return orig.apply(this, arguments);
+  };
+
+  let patched = 0;
+  let errors = [];
+  document.querySelectorAll('[jscontroller="ytxTId"]').forEach((el) => {
+    const clone = el.cloneNode(true);
+    const parent = el.parentNode;
+    if (!parent) return;
+    parent.replaceChild(clone, el);
+    try {
+      t.Ig(clone, 'rcuQ6b', undefined, false);
+      patched += 1;
+    } catch (e) {
+      errors.push(e && e.message ? e.message : String(e));
+      console.log('Ig err:', e && e.message ? e.message : e);
+    }
+  });
+  completion();
+  return { ok: true, patched, errors };
+})()
+"""
+
+OFFER_UI_READY_SCRIPT = r"""
+(() => {
+  const t = window.default_SubscriptionsManagementUi;
+  const nodes = document.querySelectorAll('[jscontroller="ytxTId"]').length;
+  return {
+    readyState: document.readyState,
+    hasUi: !!t,
+    hasSxa: !!(t && typeof t.sxa === "function"),
+    hasIg: !!(t && typeof t.Ig === "function"),
+    nodes,
+    url: location.href,
+  };
+})()
+"""
+
+OFFER_URL_PREFIXES = (
+    "https://one.google.com/offer/",
+    "https://one.google.com/partner-eft-onboard/",
+)
+CHROME_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-first-run",
+    "--no-default-browser-check",
+]
+
+
+def cookies_to_playwright(detailed: list[dict]) -> list[dict]:
+    """Convert google_auth.mint_cookies detailed output to Playwright's add_cookies format."""
+    out: list[dict] = []
+    for c in detailed:
+        domain = c.get("domain") or ""
+        if not domain:
+            continue
+        ck: dict = {
+            "name": c["name"],
+            "value": c["value"],
+            "domain": domain,
+            "path": c.get("path") or "/",
+            "secure": bool(c.get("secure")),
+            "httpOnly": bool(c.get("httpOnly")),
+            "sameSite": "Lax",
+        }
+        exp = c.get("expires")
+        if exp and exp > 0:
+            ck["expires"] = float(exp)
+        out.append(ck)
+    return out
+
+def pick_account(accounts: list[dict], email: str | None) -> dict:
+    usable = [a for a in accounts if a.get("oauth_login_token")]
+    if not usable:
+        raise SystemExit(
+            ".tokens.json 里没有可用的 OAuthLogin token。\n"
+            "请先点击前端的「准备 Chrome」或「刷新 tokens」。"
+        )
+    if email:
+        for a in usable:
+            if a["email"].lower() == email.lower():
+                return a
+        raise SystemExit(f"账号 {email} 没有可用的 OAuthLogin token")
+    if len(usable) > 1:
+        print("检测到多个可用账号，默认使用第一个。可用 --email 指定账号：")
+        for a in usable:
+            print(f"  - {a['email']}")
+    return usable[0]
+
+
+def try_auto_click(page, timeout_ms: int = 6000) -> tuple[bool, str]:
+    for sel in CLAIM_BUTTON_SELECTORS:
+        try:
+            loc = page.locator(sel).first
+            if loc.count() == 0:
+                continue
+            loc.wait_for(state="visible", timeout=timeout_ms)
+            loc.click()
+            try:
+                page.wait_for_load_state("networkidle", timeout=30000)
+            except PWTimeout:
+                pass
+            return True, sel
+        except (PWTimeout, Exception):
+            continue
+    return False, ""
+
+
+def wait_for_offer_page_load(page, timeout_ms: int) -> dict:
+    """Wait for the document load event, then best-effort network idle."""
+    detail: dict = {"load": False, "networkidle": False}
+    try:
+        page.wait_for_load_state("load", timeout=timeout_ms)
+        detail["load"] = True
+    except PWTimeout:
+        detail["load_timeout"] = True
+    try:
+        page.wait_for_load_state("networkidle", timeout=15000)
+        detail["networkidle"] = True
+    except PWTimeout:
+        detail["networkidle_timeout"] = True
+    return detail
+
+
+def is_offer_page_url(current_url: str) -> bool:
+    return any((current_url or "").startswith(prefix) for prefix in OFFER_URL_PREFIXES)
+
+
+def wait_for_offer_ui_ready(page, timeout_ms: int = 45000) -> tuple[bool, dict]:
+    """Wait until Google One's UI object and target controller nodes exist."""
+    deadline = time.time() + timeout_ms / 1000
+    last: dict = {"ok": False, "reason": "not attempted"}
+    while time.time() < deadline:
+        try:
+            last = page.evaluate(OFFER_UI_READY_SCRIPT)
+            current_url = str(last.get("url") or "")
+            if (
+                isinstance(last, dict)
+                and is_offer_page_url(current_url)
+                and last.get("readyState") == "complete"
+                and last.get("hasUi")
+                and last.get("hasSxa")
+                and last.get("hasIg")
+                and int(last.get("nodes") or 0) > 0
+            ):
+                return True, last
+            if current_url.startswith("https://accounts.google.com/"):
+                last["reason"] = "redirected_to_accounts"
+                return False, last
+        except Exception as e:
+            last = {"ok": False, "reason": str(e)}
+        time.sleep(0.5)
+    return False, last
+
+
+def apply_offer_page_patch(page, timeout_ms: int = 45000) -> tuple[bool, dict]:
+    """Load completed offer UI, then execute the Google One UI patch once."""
+    load_detail = wait_for_offer_page_load(page, timeout_ms)
+    ready, ready_detail = wait_for_offer_ui_ready(page, timeout_ms)
+    if not ready:
+        return False, {
+            "stage": "wait_ui_ready",
+            "load": load_detail,
+            "ready": ready_detail,
+        }
+    try:
+        patch_detail = page.evaluate(OFFER_PAGE_PATCH)
+    except Exception as e:
+        return False, {
+            "stage": "execute_patch",
+            "load": load_detail,
+            "ready": ready_detail,
+            "error": str(e),
+        }
+    return bool(isinstance(patch_detail, dict) and patch_detail.get("ok")), {
+        "stage": "execute_patch",
+        "load": load_detail,
+        "ready": ready_detail,
+        "patch": patch_detail,
+    }
+
+
+def describe_patch_failure(detail: dict) -> str:
+    stage = detail.get("stage")
+    if stage == "wait_ui_ready":
+        parts = ["等待 Google One 页面 UI 就绪超时"]
+    elif stage == "execute_patch":
+        parts = ["执行页面修补脚本失败"]
+    elif stage == "wait_offer_page":
+        parts = ["还没有回到 Google One 优惠页"]
+        if detail.get("url"):
+            parts.append(f"当前页面：{detail['url']}")
+    elif stage == "not_offer_page":
+        parts = ["当前不是 Google One 优惠页，已停止自动注入"]
+        if detail.get("url"):
+            parts.append(f"当前页面：{detail['url']}")
+    else:
+        parts = ["页面处理未完成"]
+
+    load = detail.get("load") or {}
+    if load:
+        parts.append("load 事件已完成" if load.get("load") else "load 事件未完成")
+        parts.append("网络已空闲" if load.get("networkidle") else "网络空闲等待超时")
+
+    ready = detail.get("ready") or {}
+    if ready:
+        ui = "有" if ready.get("hasUi") else "无"
+        sxa = "有" if ready.get("hasSxa") else "无"
+        ig = "有" if ready.get("hasIg") else "无"
+        nodes = ready.get("nodes", 0)
+        parts.append(f"页面对象：UI={ui}，sxa={sxa}，Ig={ig}，节点={nodes}")
+        if ready.get("url"):
+            parts.append(f"检测时页面：{ready['url']}")
+        if ready.get("reason") == "redirected_to_accounts":
+            parts.append("页面已跳到 Google 登录/账号选择页，所以没有执行注入")
+
+    if detail.get("error"):
+        parts.append(f"错误：{detail['error']}")
+    return "；".join(parts)
+
+
+def launch_claim_context(p, headless: bool, use_system_chrome: bool):
+    launch_kwargs = {
+        "headless": headless,
+        "args": CHROME_ARGS,
+    }
+    try:
+        if use_system_chrome:
+            browser = p.chromium.launch(
+                channel="chrome",
+                **launch_kwargs,
+            )
+            launched_with = "系统 Chrome"
+        else:
+            raise RuntimeError("using bundled")
+    except Exception:
+        browser = p.chromium.launch(**launch_kwargs)
+        launched_with = "Playwright 自带 Chromium"
+
+    context = browser.new_context(
+        user_agent=UA_CHROME,
+        viewport={"width": 1280, "height": 900},
+        locale="en-US",
+    )
+    return browser, context, launched_with
+
+
+def run(url: str, email: str | None, tokens_path: Path, headless: bool,
+        auto_click: bool, keep_open: bool, timeout_s: int, use_system_chrome: bool,
+        no_prompt: bool = False) -> int:
+    if not tokens_path.exists():
+        raise SystemExit(
+            f"找不到 {tokens_path}。\n请先点击前端的「准备 Chrome」或「刷新 tokens」。"
+        )
+    data = json.loads(tokens_path.read_text(encoding="utf-8"))
+    acc = pick_account(data.get("accounts") or [], email)
+
+    print(f"账号：{acc['email']}")
+    print(f"链接：{url}")
+    print()
+
+    print("[1/4] 正在用手机 OAuthLogin token 生成 google.com Cookie ...")
+    try:
+        _, detailed, _ = mint_cookies(acc["oauth_login_token"], continue_url=url)
+    except AuthError as e:
+        print(f"失败：{e}")
+        print("处理办法：点前端「准备 Chrome」或「刷新 tokens」拿新的 token 后再试。")
+        return 2
+    pw_cookies = cookies_to_playwright(detailed)
+    print(f"       -> 已生成 {len(pw_cookies)} 个浏览器 Cookie")
+
+    print("[2/4] 正在启动 Chromium 隔离上下文 ...")
+    with sync_playwright() as p:
+        browser, context, launched_with = launch_claim_context(
+            p,
+            headless=headless,
+            use_system_chrome=use_system_chrome,
+        )
+        print(f"       -> 已启动：{launched_with}")
+
+        print("[3/4] 正在注入 Cookie ...")
+        context.add_cookies(pw_cookies)
+        print("       -> Cookie 已注入，接下来只打开原始优惠链接")
+
+        page = context.pages[0] if context.pages else context.new_page()
+
+        print("[4/4] 正在打开原始优惠链接 ...")
+        try:
+            page.goto(url, wait_until="load", timeout=timeout_s * 1000)
+        except PWTimeout:
+            print(f"       页面加载超过 {timeout_s} 秒，继续后续步骤")
+        except Exception as e:
+            print(f"打开链接失败：{e}")
+            if not headless and not no_prompt:
+                input("\n按 Enter 关闭浏览器...")
+            context.close()
+            browser.close()
+            return 3
+
+        print(f"       -> 当前链接：{page.url}")
+        print(f"       -> 页面标题：{page.title()}")
+
+        if not is_offer_page_url(page.url):
+            print("\n[页面处理] 当前不是优惠页，停止 JS 注入。")
+            print(f"[页面处理] 当前页面：{page.url}")
+            print("[页面处理] 正在关闭自动化 Chrome，避免停留在账号页。")
+            context.close()
+            browser.close()
+            return 4
+        else:
+            print("\n[页面处理] 已到优惠链接，等待页面加载完毕和核心 UI 出现后，注入 JS ...")
+            ok, patch_detail = apply_offer_page_patch(page)
+
+        if ok:
+            patch_result = patch_detail.get("patch") or {}
+            print(f"[页面处理] 完成：已处理 {patch_result.get('patched', 0)} 个页面节点")
+            errors = patch_result.get("errors") or []
+            if errors:
+                print(f"[页面处理] Ig 调用异常：{errors[:3]}")
+        else:
+            print(f"[页面处理] 未完成：{describe_patch_failure(patch_detail)}")
+            if page.url.startswith("https://accounts.google.com/"):
+                print("[页面处理] 页面跳到了 Google 登录/账号选择页，关闭自动化 Chrome。")
+                context.close()
+                browser.close()
+                return 4
+
+        if auto_click and is_offer_page_url(page.url):
+            print("\n[自动点击] 正在查找 Accept / Claim / 领取按钮 ...")
+            ok, sel = try_auto_click(page)
+            if ok:
+                print(f"[自动点击] 已点击：{sel}")
+                print(f"[自动点击] 点击后链接：{page.url}")
+            else:
+                print("[自动点击] 没找到匹配按钮，需要在弹出的浏览器里手动点击。")
+        elif auto_click:
+            print("\n[自动点击] 当前不在优惠页，跳过自动点击。")
+
+        if no_prompt:
+            print("\n[等待] 浏览器已打开，可以在 Chromium 窗口里完成后续点击。")
+            print("[等待] 关闭 Chromium 窗口后，后台进程会自动退出。")
+            sys.stdout.flush()
+            try:
+                while context.pages:
+                    time.sleep(1)
+            except (KeyboardInterrupt, Exception):
+                pass
+            print("[等待] 浏览器已关闭，进程退出。")
+        elif keep_open or not headless:
+            print("\n浏览器已打开，可以在窗口里完成剩余点击。")
+            try:
+                input("按 Enter 关闭浏览器并退出...")
+            except EOFError:
+                pass
+
+        try:
+            context.close()
+            browser.close()
+        except Exception:
+            pass
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--url", required=True, help="the one.google.com/offer/... URL")
+    ap.add_argument("--email", help="which account in .tokens.json to use (default: first with token)")
+    ap.add_argument("--tokens", default=".tokens.json")
+    ap.add_argument("--headless", action="store_true", help="run without a visible window")
+    ap.add_argument("--auto-click", action="store_true",
+                    help="try to click the Accept/Claim button automatically")
+    ap.add_argument("--keep-open", action="store_true",
+                    help="(headless only) wait for Enter before closing")
+    ap.add_argument("--no-prompt", action="store_true",
+                    help="do not wait for console input; exit when the browser closes")
+    ap.add_argument("--timeout", type=int, default=60, help="page load timeout in seconds (default 60)")
+    ap.add_argument("--bundled-chromium", action="store_true",
+                    help="force Playwright's bundled Chromium even if system Chrome is available")
+    args = ap.parse_args()
+
+    return run(
+        url=args.url,
+        email=args.email,
+        tokens_path=Path(args.tokens),
+        headless=args.headless,
+        auto_click=args.auto_click,
+        keep_open=args.keep_open,
+        timeout_s=args.timeout,
+        use_system_chrome=not args.bundled_chromium,
+        no_prompt=args.no_prompt,
+    )
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Google One 优惠链接提取器</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main class="app">
+    <header class="hero">
+      <div class="hero-title">
+        <div class="logo" aria-hidden="true">
+          <span class="dot b"></span><span class="dot r"></span>
+          <span class="dot y"></span><span class="dot g"></span>
+        </div>
+        <div>
+          <h1>Google One 优惠链接提取器</h1>
+          <p class="sub">从已 root 的 Pixel 提取并转换为 <code>one.google.com/offer</code> 链接</p>
+        </div>
+      </div>
+    </header>
+
+    <section class="card status-card" style="--card-i:1">
+      <div class="row">
+        <div class="field">
+          <label for="device">设备</label>
+          <select id="device"></select>
+        </div>
+        <div class="badges">
+          <span class="badge" id="badge-adb">adb</span>
+          <span class="badge" id="badge-device">device</span>
+          <span class="badge" id="badge-root">root</span>
+        </div>
+        <button class="ghost" id="btn-refresh" title="重新检测设备状态">
+          <span class="icon-refresh"></span>刷新
+        </button>
+        <button class="ghost" id="btn-toggle-settings" title="设置 adb 路径等">设置</button>
+      </div>
+      <div class="hint" id="status-hint"></div>
+      <div class="settings" id="settings-panel" hidden>
+        <div class="row">
+          <div class="field grow">
+            <label for="adb-path">adb 路径</label>
+            <input
+              type="text"
+              id="adb-path"
+              placeholder="例如 C:\Users\you\AppData\Local\Android\Sdk\platform-tools\adb.exe"
+              spellcheck="false"
+              autocomplete="off"
+            />
+          </div>
+          <button class="primary" id="btn-save-adb">保存</button>
+          <button class="ghost" id="btn-clear-adb" title="清除自定义路径，改用系统 PATH">清除</button>
+        </div>
+        <div class="hint muted">
+          留空则使用系统 PATH 里的 <code>adb</code>。路径会保存到 <code>.settings.json</code>，下次启动自动生效。
+        </div>
+      </div>
+    </section>
+
+    <section class="card actions-card" style="--card-i:2">
+      <div class="row">
+        <button class="primary" id="btn-scan">
+          <span class="icon-search"></span>扫描链接
+        </button>
+        <label class="toggle" title="默认只扫描编号最大的那个目录（缓存就在那儿）；勾上会把所有历史 account 目录都扫一遍">
+          <input type="checkbox" id="all-accounts" />
+          <span>扫描所有历史目录</span>
+        </label>
+        <label class="toggle">
+          <input type="checkbox" id="all-urls" />
+          <span>匹配所有 one.google.com 链接</span>
+        </label>
+        <div class="spacer"></div>
+        <span class="summary" id="summary"></span>
+      </div>
+    </section>
+
+    <section class="card tokens-card">
+      <div class="row">
+        <span class="badge" id="badge-tokens">tokens 未加载</span>
+        <span class="tokens-detail muted" id="tokens-detail"></span>
+        <div class="spacer"></div>
+        <label class="toggle" title="Chromium 弹出后尝试自动点 Accept / 领取 按钮（页面未知时可能失败）">
+          <input type="checkbox" id="auto-click" />
+          <span>自动点领取</span>
+        </label>
+        <button class="ghost" id="btn-prime-chrome" title="在手机端打开 Chrome 并自动点已有账号授权，然后刷新 tokens">
+          准备 Chrome
+        </button>
+        <button class="ghost" id="btn-refresh-tokens" title="从手机重新抠取 OAuth token">
+          <span class="icon-refresh"></span>刷新 tokens
+        </button>
+      </div>
+      <div class="hint muted" id="tokens-hint">
+        如果没有 OAuthLogin token，先点「准备 Chrome」自动完成手机端 Chrome 账号授权，再用「自动领取」。
+      </div>
+    </section>
+
+    <section class="card claim-log-card" id="claim-log-card" hidden>
+      <div class="row claim-log-head">
+        <strong>自动领取日志</strong>
+        <span class="summary" id="claim-log-status">未启动</span>
+      </div>
+      <pre class="claim-log" id="claim-log"></pre>
+    </section>
+
+    <section id="results" class="results" aria-live="polite"></section>
+
+    <div id="empty" class="empty">
+      <div class="empty-illus">·</div>
+      <p>点击 <b>扫描链接</b> 开始。</p>
+      <p class="muted">脚本会从 <code id="remote-base">/data/user/0/com.google.android.apps.subscriptions.red/files/accounts/…</code> 读取缓存。</p>
+    </div>
+
+    <div id="toast" class="toast" role="status"></div>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

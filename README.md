@@ -95,11 +95,6 @@ Web UI 的「刷新 tokens」会做两件事：
 拿到 token 后，电脑端会用它换取 Google 网页 Cookie，并由「自动领取」在本机
 Chromium 里打开优惠链接。
 
-自动领取浏览器默认固定为视口 `1600x900`、窗口 `1600x1000`、DPI `1`，用于让
-不同电脑打开时的页面布局尽量一致。需要调整时可以设置环境变量
-`AUTO_CLAIM_VIEWPORT=宽x高` 和 `AUTO_CLAIM_WINDOW_SIZE=宽x高`，或命令行传
-`--viewport 1600x900 --window-size 1600x1000`。
-
 ## 原理
 
 该 db 是 Google 内部的 `SqliteKeyValueCache` —— 一个 key/value 表，

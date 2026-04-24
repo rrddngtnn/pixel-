@@ -39,6 +39,7 @@ except ImportError:
         "Run:\n  pip install -r requirements.txt\n  playwright install chromium"
     )
 
+from extract_tokens import collect_tokens
 from google_auth import AuthError, UA_CHROME, mint_cookies
 
 
@@ -121,6 +122,7 @@ CHROME_ARGS = [
 DEFAULT_CLAIM_VIEWPORT = "1600x900"
 DEFAULT_CLAIM_WINDOW_SIZE = "1600x1000"
 FIXED_DEVICE_SCALE_FACTOR = 1
+TOKEN_STALE_SECONDS = 45 * 60
 
 
 def cookies_to_playwright(detailed: list[dict]) -> list[dict]:
@@ -162,6 +164,39 @@ def pick_account(accounts: list[dict], email: str | None) -> dict:
         for a in usable:
             print(f"  - {a['email']}")
     return usable[0]
+
+
+def load_tokens(tokens_path: Path) -> dict:
+    return json.loads(tokens_path.read_text(encoding="utf-8"))
+
+
+def save_tokens(tokens_path: Path, data: dict) -> dict:
+    persisted = {
+        "android_id": data["android_id"],
+        "accounts": data["accounts"],
+    }
+    tokens_path.write_text(json.dumps(persisted, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        os.chmod(tokens_path, 0o600)
+    except OSError:
+        pass
+    return persisted
+
+
+def refresh_tokens(tokens_path: Path, serial: str | None) -> dict:
+    result = collect_tokens(serial)
+    return save_tokens(tokens_path, result)
+
+
+def token_file_is_stale(tokens_path: Path) -> bool:
+    try:
+        return time.time() - tokens_path.stat().st_mtime > TOKEN_STALE_SECONDS
+    except OSError:
+        return True
+
+
+def auth_error_is_badauth(error: Exception) -> bool:
+    return "badauth" in str(error).lower()
 
 
 def try_auto_click(page, timeout_ms: int = 6000) -> tuple[bool, str]:
@@ -359,12 +394,33 @@ def launch_claim_context(
 def run(url: str, email: str | None, tokens_path: Path, headless: bool,
         auto_click: bool, keep_open: bool, timeout_s: int, use_system_chrome: bool,
         no_prompt: bool = False, browser_viewport: dict[str, int] | None = None,
-        browser_window_size: dict[str, int] | None = None) -> int:
+        browser_window_size: dict[str, int] | None = None,
+        refresh_serial: str | None = None, refresh_stale_tokens: bool = False,
+        retry_badauth: bool = False) -> int:
     if not tokens_path.exists():
-        raise SystemExit(
-            f"找不到 {tokens_path}。\n请先点击前端的「准备 Chrome」或「刷新 tokens」。"
-        )
-    data = json.loads(tokens_path.read_text(encoding="utf-8"))
+        if not refresh_stale_tokens:
+            raise SystemExit(
+                f"找不到 {tokens_path}。\n请先点击前端的「准备 Chrome」或「刷新 tokens」。"
+            )
+        print("[0/4] 找不到 .tokens.json，正在从手机刷新 tokens ...")
+        try:
+            data = refresh_tokens(tokens_path, refresh_serial)
+        except Exception as e:
+            print(f"[0/4] 刷新 tokens 失败：{e}")
+            print("处理办法：点前端「准备 Chrome」或「刷新 tokens」拿新的 token 后再试。")
+            return 2
+    elif refresh_stale_tokens and token_file_is_stale(tokens_path):
+        print("[0/4] 当前 tokens 已超过 45 分钟，正在从手机自动刷新 ...")
+        try:
+            data = refresh_tokens(tokens_path, refresh_serial)
+            usable_count = len([a for a in data.get("accounts") or [] if a.get("oauth_login_token")])
+            print(f"       -> tokens 已刷新，{usable_count} 个账号有 OAuthLogin token")
+        except Exception as e:
+            print(f"[0/4] 自动刷新 tokens 失败：{e}")
+            print("       -> 继续尝试使用现有 tokens")
+            data = load_tokens(tokens_path)
+    else:
+        data = load_tokens(tokens_path)
     acc = pick_account(data.get("accounts") or [], email)
 
     print(f"账号：{acc['email']}")
@@ -375,9 +431,26 @@ def run(url: str, email: str | None, tokens_path: Path, headless: bool,
     try:
         _, detailed, _ = mint_cookies(acc["oauth_login_token"], continue_url=url)
     except AuthError as e:
+        if not (retry_badauth and auth_error_is_badauth(e)):
+            print(f"失败：{e}")
+            print("处理办法：点前端「准备 Chrome」或「刷新 tokens」拿新的 token 后再试。")
+            return 2
+
         print(f"失败：{e}")
-        print("处理办法：点前端「准备 Chrome」或「刷新 tokens」拿新的 token 后再试。")
-        return 2
+        print("       -> OAuthLogin token 已失效，正在从手机刷新 tokens 后重试一次 ...")
+        try:
+            data = refresh_tokens(tokens_path, refresh_serial)
+            acc = pick_account(data.get("accounts") or [], email)
+            print(f"       -> tokens 已刷新，重试账号：{acc['email']}")
+            _, detailed, _ = mint_cookies(acc["oauth_login_token"], continue_url=url)
+        except AuthError as retry_error:
+            print(f"重试失败：{retry_error}")
+            print("处理办法：点前端「准备 Chrome」后再试；如果手机 Chrome 弹出授权页，需要先让它完成授权。")
+            return 2
+        except Exception as refresh_error:
+            print(f"刷新 tokens 失败：{refresh_error}")
+            print("处理办法：点前端「准备 Chrome」或「刷新 tokens」拿新的 token 后再试。")
+            return 2
     pw_cookies = cookies_to_playwright(detailed)
     print(f"       -> 已生成 {len(pw_cookies)} 个浏览器 Cookie")
 
@@ -498,6 +571,11 @@ def main() -> int:
     ap.add_argument("--timeout", type=int, default=60, help="page load timeout in seconds (default 60)")
     ap.add_argument("--bundled-chromium", action="store_true",
                     help="force Playwright's bundled Chromium even if system Chrome is available")
+    ap.add_argument("--serial", help="adb serial used when refreshing stale/expired phone tokens")
+    ap.add_argument("--refresh-stale-tokens", action="store_true",
+                    help="refresh .tokens.json from the phone first when it is older than 45 minutes")
+    ap.add_argument("--retry-badauth", action="store_true",
+                    help="if OAuthLogin returns badauth, refresh tokens and retry once")
     ap.add_argument(
         "--viewport",
         default=os.environ.get("AUTO_CLAIM_VIEWPORT", DEFAULT_CLAIM_VIEWPORT),
@@ -527,6 +605,9 @@ def main() -> int:
         no_prompt=args.no_prompt,
         browser_viewport=browser_viewport,
         browser_window_size=browser_window_size,
+        refresh_serial=args.serial,
+        refresh_stale_tokens=args.refresh_stale_tokens,
+        retry_badauth=args.retry_badauth,
     )
 
 

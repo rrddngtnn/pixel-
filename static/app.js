@@ -395,7 +395,11 @@
     try {
       const res = await api("/api/auto-claim", {
         method: "POST",
-        body: JSON.stringify({ url, auto_click: autoClickCbx.checked }),
+        body: JSON.stringify({
+          url,
+          serial: selectedSerial() || null,
+          auto_click: autoClickCbx.checked,
+        }),
       });
       showToast(`已后台启动领取流程：${res.email} · PID ${res.pid}`, "success");
       if (res.job_id) startClaimLog(res.job_id);

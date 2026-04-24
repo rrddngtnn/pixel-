@@ -401,6 +401,7 @@ def api_auto_claim():
     data = request.get_json(silent=True) or {}
     url = (data.get("url") or "").strip()
     email = (data.get("email") or "").strip() or None
+    serial = (data.get("serial") or "").strip() or None
     auto_click = bool(data.get("auto_click"))
 
     url = normalize_offer_url(url)
@@ -431,9 +432,20 @@ def api_auto_claim():
     AUTO_CLAIM_LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = AUTO_CLAIM_LOG_DIR / f"{job_id}.log"
 
-    cmd = [sys.executable, "-u", str(AUTO_CLAIM_SCRIPT), "--url", url, "--no-prompt"]
+    cmd = [
+        sys.executable,
+        "-u",
+        str(AUTO_CLAIM_SCRIPT),
+        "--url",
+        url,
+        "--no-prompt",
+        "--refresh-stale-tokens",
+        "--retry-badauth",
+    ]
     if email:
         cmd += ["--email", email]
+    if serial:
+        cmd += ["--serial", serial]
     if auto_click:
         cmd += ["--auto-click"]
 
@@ -444,6 +456,8 @@ def api_auto_claim():
     log_fp = log_path.open("w", encoding="utf-8", errors="replace")
     log_fp.write(f"[后端] 任务：{job_id}\n")
     log_fp.write(f"[后端] 链接：{url}\n")
+    if serial:
+        log_fp.write(f"[后端] 设备：{serial}\n")
     log_fp.write(f"[后端] 自动点击：{'开启' if auto_click else '关闭'}\n")
     log_fp.flush()
 

@@ -19,7 +19,7 @@ APK_OUT = OUT_DIR / "pixel-oauth-helper.apk"
 KEYSTORE = OUT_DIR / "debug.keystore"
 
 
-def run(cmd: list[str], **kwargs) -> None:
+def run(cmd: list[str | Path], **kwargs) -> None:
     print(" ".join(str(c) for c in cmd))
     subprocess.run([str(c) for c in cmd], check=True, **kwargs)
 
@@ -31,13 +31,35 @@ def first_existing(paths: list[Path]) -> Path | None:
     return None
 
 
+def _resolve_tool(directory: Path, base_name: str, win_exts: tuple[str, ...] = (".exe", ".bat")) -> Path | None:
+    if sys.platform == "win32":
+        for ext in win_exts:
+            cand = directory / f"{base_name}{ext}"
+            if cand.exists():
+                return cand
+    cand = directory / base_name
+    if cand.exists():
+        return cand
+    for ext in win_exts:
+        cand_ext = directory / f"{base_name}{ext}"
+        if cand_ext.exists():
+            return cand_ext
+    return None
+
+
 def find_sdk() -> Path:
     candidates = []
     for key in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
         value = (os.environ.get(key) or "").strip()
         if value:
             candidates.append(Path(value))
-    candidates.append(Path.home() / "AppData" / "Local" / "Android" / "Sdk")
+    candidates += [
+        Path.home() / "AppData" / "Local" / "Android" / "Sdk",
+        Path.home() / "Library" / "Android" / "sdk",
+        Path.home() / "Android" / "Sdk",
+        Path("/usr/lib/android-sdk"),
+        Path("/opt/android-sdk"),
+    ]
     sdk = first_existing(candidates)
     if not sdk:
         raise SystemExit("Android SDK not found. Set ANDROID_HOME or install Android Studio SDK.")
@@ -49,17 +71,27 @@ def find_java_home() -> Path:
     java_home_env = (os.environ.get("JAVA_HOME") or "").strip()
     if java_home_env:
         candidates.append(Path(java_home_env))
+    which_javac = shutil.which("javac")
+    if which_javac:
+        candidates.append(Path(which_javac).resolve().parent.parent)
     candidates += [
         Path("C:/Program Files/Android/Android Studio/jbr"),
         Path("C:/Program Files/Android/Android Studio/jre"),
+        Path("/Applications/Android Studio.app/Contents/jbr/Contents/Home"),
+        Path("/opt/android-studio/jbr"),
+        Path("/usr/lib/jvm/default-java"),
     ]
-    java_home = first_existing([p for p in candidates if (p / "bin" / "javac.exe").exists()])
+    java_home = first_existing(
+        [p for p in candidates if _resolve_tool(p / "bin", "javac", (".exe",)) is not None]
+    )
     if not java_home:
-        raise SystemExit("JDK not found. Install Android Studio or set JAVA_HOME.")
+        raise SystemExit("JDK not found. Install Android Studio / JDK or set JAVA_HOME.")
     return java_home
 
 
 def newest_child(parent: Path, predicate) -> Path:
+    if not parent.exists():
+        raise SystemExit(f"Directory not found: {parent}")
     children = [p for p in parent.iterdir() if predicate(p)]
     if not children:
         raise SystemExit(f"No usable entry found under {parent}")
@@ -81,16 +113,29 @@ def main() -> int:
     sdk = find_sdk()
     java_home = find_java_home()
     platform = newest_child(sdk / "platforms", lambda p: (p / "android.jar").exists())
-    build_tools = newest_child(sdk / "build-tools", lambda p: (p / "aapt2.exe").exists())
+    build_tools = newest_child(
+        sdk / "build-tools",
+        lambda p: _resolve_tool(p, "aapt2", (".exe",)) is not None,
+    )
 
     android_jar = platform / "android.jar"
-    aapt2 = build_tools / "aapt2.exe"
-    d8 = build_tools / "d8.bat"
-    zipalign = build_tools / "zipalign.exe"
-    apksigner = build_tools / "apksigner.bat"
-    javac = java_home / "bin" / "javac.exe"
-    jar = java_home / "bin" / "jar.exe"
-    keytool = java_home / "bin" / "keytool.exe"
+    aapt2 = _resolve_tool(build_tools, "aapt2", (".exe",))
+    d8 = _resolve_tool(build_tools, "d8", (".bat", ".exe"))
+    zipalign = _resolve_tool(build_tools, "zipalign", (".exe",))
+    apksigner = _resolve_tool(build_tools, "apksigner", (".bat", ".exe"))
+    javac = _resolve_tool(java_home / "bin", "javac", (".exe",))
+    jar = _resolve_tool(java_home / "bin", "jar", (".exe",))
+    keytool = _resolve_tool(java_home / "bin", "keytool", (".exe",))
+    if not (
+        aapt2 is not None
+        and d8 is not None
+        and zipalign is not None
+        and apksigner is not None
+        and javac is not None
+        and jar is not None
+        and keytool is not None
+    ):
+        raise SystemExit(f"Missing required SDK/JDK build binaries under {build_tools} or {java_home}")
 
     shutil.rmtree(OUT_DIR, ignore_errors=True)
     OUT_DIR.mkdir(parents=True)

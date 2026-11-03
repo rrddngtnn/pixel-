@@ -38,7 +38,9 @@ from extract_offers import (
     list_devices,
     normalize_offer_url,
     pull_db,
+    reset_google_one_session,
     scan_urls_on_device,
+    to_partner_url,
 )
 from extract_tokens import collect_tokens
 
@@ -64,7 +66,7 @@ def _read_log_tail(path: Path, limit: int = AUTO_CLAIM_LOG_LIMIT) -> str:
             f.seek(max(0, size - limit))
             data = f.read()
     except OSError as e:
-        return f"[后端] 读取日志失败：{e}"
+        return f"[Backend] Failed to read log: {e}"
     return data.decode("utf-8", errors="replace")
 
 
@@ -395,6 +397,28 @@ def api_prime_chrome():
     )
 
 
+@app.post("/api/reset-google-one")
+def api_reset_google_one():
+    """Force-stop and clear Google One app data on the selected rooted device."""
+    data = request.get_json(silent=True) or {}
+    serial = data.get("serial") or None
+
+    if not has_adb():
+        return jsonify(ok=False, error="adb not available"), 400
+
+    devices = list_devices()
+    selected = _pick_serial(serial, devices)
+    if not selected:
+        return jsonify(ok=False, error="No device selected."), 400
+
+    try:
+        msg = reset_google_one_session(selected)
+    except ExtractError as e:
+        return jsonify(ok=False, error=str(e)), 400
+
+    return jsonify(ok=True, serial=selected, message=msg)
+
+
 @app.post("/api/auto-claim")
 def api_auto_claim():
     """Spawn auto_claim.py in the background and expose its stdout through a log endpoint."""
@@ -403,8 +427,10 @@ def api_auto_claim():
     email = (data.get("email") or "").strip() or None
     serial = (data.get("serial") or "").strip() or None
     auto_click = bool(data.get("auto_click"))
+    use_partner_url = bool(data.get("use_partner_url"))
 
-    url = normalize_offer_url(url)
+    if use_partner_url:
+        url = to_partner_url(url)
     if not (
         url.startswith("https://one.google.com/offer/")
         or url.startswith("https://one.google.com/partner-eft-onboard/")
@@ -412,7 +438,7 @@ def api_auto_claim():
         return jsonify(ok=False, error="Only Google One offer URLs are allowed."), 400
 
     if not TOKENS_FILE.exists():
-        return jsonify(ok=False, error="No .tokens.json — click 刷新 tokens first."), 400
+        return jsonify(ok=False, error="No .tokens.json — click Refresh Tokens first."), 400
 
     try:
         tokens = json.loads(TOKENS_FILE.read_text(encoding="utf-8"))
@@ -454,11 +480,11 @@ def api_auto_claim():
     env["PYTHONIOENCODING"] = "utf-8"
 
     log_fp = log_path.open("w", encoding="utf-8", errors="replace")
-    log_fp.write(f"[后端] 任务：{job_id}\n")
-    log_fp.write(f"[后端] 链接：{url}\n")
+    log_fp.write(f"[Backend] Job:        {job_id}\n")
+    log_fp.write(f"[Backend] URL:        {url}\n")
     if serial:
-        log_fp.write(f"[后端] 设备：{serial}\n")
-    log_fp.write(f"[后端] 自动点击：{'开启' if auto_click else '关闭'}\n")
+        log_fp.write(f"[Backend] Device:     {serial}\n")
+    log_fp.write(f"[Backend] Auto-Click: {'enabled' if auto_click else 'disabled'}\n")
     log_fp.flush()
 
     popen_kwargs: dict = {
@@ -477,7 +503,7 @@ def api_auto_claim():
         proc = subprocess.Popen(cmd, **popen_kwargs)
     except OSError as e:
         log_fp.close()
-        return jsonify(ok=False, error=f"启动自动领取失败：{e}"), 500
+        return jsonify(ok=False, error=f"Failed to start auto-claim process: {e}"), 500
     finally:
         try:
             log_fp.close()
@@ -505,7 +531,7 @@ def api_auto_claim():
 @app.get("/api/auto-claim/<job_id>")
 def api_auto_claim_log(job_id: str):
     if not job_id or len(job_id) > 80 or any(c not in "0123456789abcdefABCDEF_-" for c in job_id):
-        return jsonify(ok=False, error="任务 ID 无效。"), 400
+        return jsonify(ok=False, error="Invalid job ID."), 400
 
     with AUTO_CLAIM_LOCK:
         job = AUTO_CLAIM_JOBS.get(job_id)
@@ -528,7 +554,7 @@ def api_auto_claim_log(job_id: str):
 
     log_path = AUTO_CLAIM_LOG_DIR / f"{job_id}.log"
     if not log_path.exists():
-        return jsonify(ok=False, error="找不到这个自动领取任务。"), 404
+        return jsonify(ok=False, error="Auto-claim job not found."), 404
     return jsonify(
         ok=True,
         job_id=job_id,

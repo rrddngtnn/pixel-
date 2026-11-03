@@ -5,6 +5,7 @@
   const badgeDev    = $("#badge-device");
   const badgeRoot   = $("#badge-root");
   const btnRefresh  = $("#btn-refresh");
+  const btnResetG1  = $("#btn-reset-g1");
   const btnScan     = $("#btn-scan");
   const allUrlsCbx  = $("#all-urls");
   const allAccountsCbx = $("#all-accounts");
@@ -78,24 +79,24 @@
       }
 
       if (!s.adb) {
-        setBadge(badgeAdb, "adb 未找到", "bad");
-        setBadge(badgeDev, "无设备", "bad");
-        setBadge(badgeRoot, "root 未知", "bad");
+        setBadge(badgeAdb, "adb missing", "bad");
+        setBadge(badgeDev, "no device", "bad");
+        setBadge(badgeRoot, "root unknown", "bad");
         deviceSel.innerHTML = '<option value="">—</option>';
         statusHint.textContent =
           s.error ||
-          "请安装 Android platform-tools，并通过下方『设置』里填写 adb.exe 的完整路径，或把它加到系统 PATH。";
+          "Install Android platform-tools and set the full adb path in Settings below, or add it to your system PATH.";
         settingsPanel.hidden = false;
         btnScan.disabled = true;
         return;
       }
-      setBadge(badgeAdb, s.adb_path ? "adb (自定义)" : "adb 已就绪", "ok");
+      setBadge(badgeAdb, s.adb_path ? "adb (custom)" : "adb ready", "ok");
 
       const prev = deviceSel.value;
       deviceSel.innerHTML = "";
       if (!s.devices.length) {
         const opt = document.createElement("option");
-        opt.value = ""; opt.textContent = "（未检测到设备）";
+        opt.value = ""; opt.textContent = "(no device detected)";
         deviceSel.appendChild(opt);
       } else {
         for (const d of s.devices) {
@@ -111,37 +112,37 @@
       }
 
       if (!s.selected) {
-        setBadge(badgeDev, "未选择设备", "warn");
-        setBadge(badgeRoot, "root 未知", "warn");
+        setBadge(badgeDev, "unselected", "warn");
+        setBadge(badgeRoot, "root unknown", "warn");
         statusHint.textContent = s.devices.length
-          ? "检测到多台设备，请从下拉框选一台。"
-          : "没有检测到设备。请插上手机并在提示里允许 USB 调试。";
+          ? "Multiple devices detected; select one from the dropdown."
+          : "No device detected. Connect your phone and authorize USB debugging.";
         btnScan.disabled = true;
         return;
       }
 
       if (s.device_state !== "device") {
-        setBadge(badgeDev, `设备: ${s.device_state || "未知"}`, "bad");
-        setBadge(badgeRoot, "root 未知", "warn");
-        statusHint.textContent = "设备未就绪，请检查 USB 调试授权。";
+        setBadge(badgeDev, `device: ${s.device_state || "unknown"}`, "bad");
+        setBadge(badgeRoot, "root unknown", "warn");
+        statusHint.textContent = "Device not ready; check USB debugging authorization on the phone.";
         btnScan.disabled = true;
         return;
       }
-      setBadge(badgeDev, "设备已就绪", "ok");
+      setBadge(badgeDev, "device ready", "ok");
 
       if (s.root) {
-        setBadge(badgeRoot, "root 已授权", "ok");
+        setBadge(badgeRoot, "root granted", "ok");
         statusHint.textContent = "";
         btnScan.disabled = false;
       } else {
-        setBadge(badgeRoot, "root 未授权", "bad");
+        setBadge(badgeRoot, "root denied", "bad");
         statusHint.textContent =
-          "adb shell 没有 root 权限。\n请在 Magisk / KernelSU 管理器里把 root 授权给「Shell」。\n" +
+          "adb shell does not have root access.\nGrant Superuser/root permission to 'Shell' in Magisk / KernelSU / APatch.\n" +
           (s.root_output || "");
         btnScan.disabled = true;
       }
     } catch (e) {
-      showToast("刷新失败：" + e.message, "error");
+      showToast("Refresh failed: " + e.message, "error");
     } finally {
       btnRefresh.classList.remove("loading");
     }
@@ -152,10 +153,10 @@
     const { accounts, total, mode, scanned, total_dirs } = data;
     emptyEl.classList.add("hidden");
     const scopePart = (scanned != null && total_dirs != null)
-      ? ` · 扫描 ${scanned}/${total_dirs} 个目录`
-      : ` · ${accounts.length} 个账户`;
+      ? ` · scanned ${scanned}/${total_dirs} dir(s)`
+      : ` · ${accounts.length} account(s)`;
     summary.textContent =
-      `共 ${total} 条链接${scopePart} · 模式: ${mode === "all" ? "all one.google.com" : "offer"}`;
+      `${total} link(s)${scopePart} · mode: ${mode === "all" ? "all one.google.com" : "offer"}`;
 
     if (!accounts.length) {
       emptyEl.classList.remove("hidden");
@@ -168,17 +169,17 @@
 
       const head = document.createElement("div");
       head.className = "account-head";
-      head.innerHTML = `<h3>账户 <code>${escapeHtml(shortId(acc.account))}</code></h3>`;
+      head.innerHTML = `<h3>Account <code>${escapeHtml(shortId(acc.account))}</code></h3>`;
       const count = document.createElement("span");
       count.className = "count";
-      count.textContent = `${acc.urls.length} 条`;
+      count.textContent = `${acc.urls.length} link(s)`;
       head.appendChild(count);
       card.appendChild(head);
 
       if (!acc.urls.length) {
         const note = document.createElement("div");
         note.className = "note";
-        note.textContent = acc.note || "（无）";
+        note.textContent = acc.note || "(none)";
         card.appendChild(note);
       } else {
         const ul = document.createElement("ul");
@@ -192,6 +193,15 @@
     }
   }
 
+  function toPartnerUrl(url) {
+    const offerPrefix = "https://one.google.com/offer/";
+    const partnerPrefix = "https://one.google.com/partner-eft-onboard/";
+    if (url.startsWith(offerPrefix)) {
+      return partnerPrefix + url.slice(offerPrefix.length);
+    }
+    return url;
+  }
+
   function renderUrlRow(url) {
     const li = document.createElement("li");
 
@@ -201,40 +211,59 @@
 
     const copy = document.createElement("button");
     copy.className = "link-btn copy";
-    copy.textContent = "复制";
+    copy.textContent = "Copy /offer/";
     copy.addEventListener("click", async () => {
       try {
         await navigator.clipboard.writeText(url);
         copy.classList.add("ok");
-        copy.textContent = "已复制";
-        setTimeout(() => { copy.classList.remove("ok"); copy.textContent = "复制"; }, 1200);
+        copy.textContent = "Copied";
+        setTimeout(() => { copy.classList.remove("ok"); copy.textContent = "Copy /offer/"; }, 1200);
       } catch {
-        showToast("复制失败，请手动选中", "error");
+        showToast("Copy failed; please copy manually", "error");
+      }
+    });
+
+    const partnerUrl = toPartnerUrl(url);
+    const copyPartner = document.createElement("button");
+    copyPartner.className = "link-btn copy";
+    copyPartner.textContent = "Copy EFT";
+    copyPartner.title = partnerUrl;
+    copyPartner.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(partnerUrl);
+        copyPartner.classList.add("ok");
+        copyPartner.textContent = "Copied EFT";
+        setTimeout(() => { copyPartner.classList.remove("ok"); copyPartner.textContent = "Copy EFT"; }, 1200);
+      } catch {
+        showToast("Copy failed; please copy manually", "error");
       }
     });
 
     const open = document.createElement("button");
     open.className = "link-btn";
-    open.textContent = "打开";
+    open.textContent = "Open";
     open.addEventListener("click", async () => {
       try {
         await api("/api/open", { method: "POST", body: JSON.stringify({ url }) });
-        showToast("已在默认浏览器打开", "success");
+        showToast("Opened in default browser", "success");
       } catch (e) {
-        showToast("打开失败：" + e.message, "error");
+        showToast("Open failed: " + e.message, "error");
       }
     });
 
     const claim = document.createElement("button");
     claim.className = "link-btn claim-btn";
-    claim.textContent = "自动领取";
+    claim.textContent = "Auto Claim";
     const hasUsable = (tokensState.accounts || []).some((a) => a.has_oauth_login);
     claim.disabled = !hasUsable;
-    claim.title = hasUsable ? "用本机 Chromium 打开并自动登录领取" : "先点『刷新 tokens』";
+    claim.title = hasUsable ? "Launch local Chromium with injected cookies and claim" : "Click 'Refresh Tokens' first";
     claim.addEventListener("click", () => autoClaim(url, claim));
 
     li.appendChild(span);
     li.appendChild(copy);
+    if (partnerUrl !== url) {
+      li.appendChild(copyPartner);
+    }
     li.appendChild(open);
     li.appendChild(claim);
     return li;
@@ -248,10 +277,10 @@
   function formatAgo(ts) {
     if (!ts) return "";
     const delta = Math.max(0, Date.now() / 1000 - ts);
-    if (delta < 60) return `${Math.floor(delta)} 秒前`;
-    if (delta < 3600) return `${Math.floor(delta / 60)} 分钟前`;
-    if (delta < 86400) return `${Math.floor(delta / 3600)} 小时前`;
-    return `${Math.floor(delta / 86400)} 天前`;
+    if (delta < 60) return `${Math.floor(delta)}s ago`;
+    if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
+    if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
+    return `${Math.floor(delta / 86400)}d ago`;
   }
 
   function renderTokensState(s) {
@@ -260,25 +289,25 @@
     const usable = accounts.filter((a) => a.has_oauth_login);
 
     if (!tokensState.has_tokens) {
-      setBadge(badgeTokens, "tokens 未加载", "warn");
-      tokensDetail.textContent = "先点『准备 Chrome』或手动登录手机 Chrome，再点『刷新 tokens』";
+      setBadge(badgeTokens, "tokens not loaded", "warn");
+      tokensDetail.textContent = "Click 'Prime Chrome' or sign into Chrome on the phone, then click 'Refresh Tokens'";
     } else if (!usable.length) {
-      setBadge(badgeTokens, "无可用 OAuth", "bad");
+      setBadge(badgeTokens, "no usable OAuth", "bad");
       tokensDetail.textContent =
-        `${accounts.length} 个账户在 .tokens.json，但没有 OAuthLogin token；` +
-        `点『准备 Chrome』自动完成手机端 Chrome 授权`;
+        `${accounts.length} account(s) in .tokens.json, but none have an OAuthLogin token; ` +
+        `click 'Prime Chrome' to authorize mobile Chrome`;
     } else {
-      setBadge(badgeTokens, `${usable.length}/${accounts.length} 账户可用`, "ok");
+      setBadge(badgeTokens, `${usable.length}/${accounts.length} account(s) ready`, "ok");
       const age = tokensState.refreshed_at ? formatAgo(tokensState.refreshed_at) : "";
       const stale = tokensState.refreshed_at &&
         Date.now() / 1000 - tokensState.refreshed_at > 45 * 60;
       const emails = usable.map((a) => a.email).join(", ");
-      tokensDetail.textContent = `${emails} · 刷新于 ${age}` + (stale ? " (可能已过期)" : "");
+      tokensDetail.textContent = `${emails} · refreshed ${age}` + (stale ? " (may be expired)" : "");
     }
 
     for (const btn of document.querySelectorAll(".claim-btn")) {
       btn.disabled = !usable.length;
-      btn.title = usable.length ? "用本机 Chromium 打开并自动登录领取" : "先点『刷新 tokens』";
+      btn.title = usable.length ? "Launch local Chromium with injected cookies and claim" : "Click 'Refresh Tokens' first";
     }
   }
 
@@ -300,12 +329,12 @@
       const usable = (data.accounts || []).filter((a) => a.has_oauth_login).length;
       showToast(
         usable
-          ? `已刷新 tokens：${usable} 个账号可用`
-          : "已抠到 tokens，但没有可用的 OAuthLogin",
+          ? `Tokens refreshed: ${usable} account(s) ready`
+          : "Tokens pulled, but no OAuthLogin token found",
         usable ? "success" : ""
       );
     } catch (e) {
-      showToast("刷新失败：" + e.message, "error");
+      showToast("Refresh failed: " + e.message, "error");
     } finally {
       btnRefreshTokens.classList.remove("loading");
     }
@@ -321,15 +350,33 @@
       renderTokensState(data);
       const usable = (data.accounts || []).filter((a) => a.has_oauth_login).length;
       if (usable) {
-        showToast(`Chrome 已准备好：${usable} 个账号可用`, "success");
+        showToast(`Chrome primed: ${usable} account(s) ready`, "success");
       } else {
-        const note = data.chrome && data.chrome.note ? `：${data.chrome.note}` : "";
-        showToast("Chrome 已尝试授权，但仍没有 OAuthLogin" + note, "");
+        const note = data.chrome && data.chrome.note ? `: ${data.chrome.note}` : "";
+        showToast("Chrome sign-in attempted, but still no OAuthLogin token" + note, "");
       }
     } catch (e) {
-      showToast("准备 Chrome 失败：" + e.message, "error");
+      showToast("Prime Chrome failed: " + e.message, "error");
     } finally {
       btnPrimeChrome.classList.remove("loading");
+    }
+  }
+
+  async function resetGoogleOne() {
+    if (!btnResetG1) return;
+    btnResetG1.classList.add("loading");
+    btnResetG1.disabled = true;
+    try {
+      const data = await api("/api/reset-google-one", {
+        method: "POST",
+        body: JSON.stringify({ serial: selectedSerial() || null }),
+      });
+      showToast(`Google One app data cleared (${data.serial})`, "success");
+    } catch (e) {
+      showToast("Reset Google One failed: " + e.message, "error");
+    } finally {
+      btnResetG1.classList.remove("loading");
+      btnResetG1.disabled = false;
     }
   }
 
@@ -346,7 +393,7 @@
     claimLogBusy = true;
     try {
       const data = await fetch(`/api/auto-claim/${encodeURIComponent(jobId)}`).then((r) => r.json());
-      if (!data.ok) throw new Error(data.error || "日志读取失败");
+      if (!data.ok) throw new Error(data.error || "Failed to read log");
       if (jobId !== activeClaimJobId) return true;
 
       claimLogCard.hidden = false;
@@ -354,17 +401,17 @@
       claimLog.scrollTop = claimLog.scrollHeight;
 
       if (data.running) {
-        claimLogStatus.textContent = `运行中 · PID ${data.pid}`;
+        claimLogStatus.textContent = `Running · PID ${data.pid}`;
       } else {
-        const code = data.returncode == null ? "未知" : data.returncode;
-        claimLogStatus.textContent = `已结束 · 退出码 ${code}`;
+        const code = data.returncode == null ? "unknown" : data.returncode;
+        claimLogStatus.textContent = `Finished · exit code ${code}`;
       }
       return Boolean(data.running);
     } catch (e) {
       claimLogCard.hidden = false;
-      claimLogStatus.textContent = "日志读取失败";
+      claimLogStatus.textContent = "Log read error";
       document.body.classList.add("show-claim-log");
-      claimLog.textContent += `\n[前端] ${e.message}`;
+      claimLog.textContent += `\n[Frontend] ${e.message}`;
       return false;
     } finally {
       claimLogBusy = false;
@@ -376,8 +423,8 @@
     activeClaimJobId = jobId;
     document.body.classList.add("show-claim-log");
     claimLogCard.hidden = false;
-    claimLogStatus.textContent = `启动中 · ${jobId.slice(0, 8)}`;
-    claimLog.textContent = "后台进程已启动，正在等待日志...\n";
+    claimLogStatus.textContent = `Starting · ${jobId.slice(0, 8)}`;
+    claimLog.textContent = "Background process started; waiting for output...\n";
 
     const tick = async () => {
       const running = await updateClaimLog(jobId);
@@ -401,18 +448,18 @@
           auto_click: autoClickCbx.checked,
         }),
       });
-      showToast(`已后台启动领取流程：${res.email} · PID ${res.pid}`, "success");
+      showToast(`Started auto-claim: ${res.email} · PID ${res.pid}`, "success");
       if (res.job_id) startClaimLog(res.job_id);
       if (btn) {
-        btn.textContent = "已启动";
+        btn.textContent = "Started";
         setTimeout(() => {
-          btn.textContent = "自动领取";
+          btn.textContent = "Auto Claim";
           btn.disabled = !tokensState.accounts.some((a) => a.has_oauth_login);
         }, 3000);
       }
     } catch (e) {
-      showToast("领取失败：" + e.message, "error");
-      if (btn) btn.textContent = "自动领取";
+      showToast("Auto-claim failed: " + e.message, "error");
+      if (btn) btn.textContent = "Auto Claim";
     } finally {
       if (btn) btn.classList.remove("loading");
     }
@@ -427,7 +474,7 @@
   async function scan() {
     btnScan.classList.add("loading");
     btnScan.disabled = true;
-    summary.textContent = "正在扫描…";
+    summary.textContent = "Scanning…";
     resultsEl.innerHTML = "";
     try {
       const data = await api("/api/scan", {
@@ -440,13 +487,13 @@
       });
       renderResults(data);
       if (data.total === 0) {
-        showToast("没有匹配到链接，试试勾选『匹配所有 one.google.com』", "");
+        showToast("No offer links matched; try checking 'Match all one.google.com URLs'", "");
       } else {
-        showToast(`提取到 ${data.total} 条链接`, "success");
+        showToast(`Extracted ${data.total} link(s)`, "success");
       }
     } catch (e) {
       summary.textContent = "";
-      showToast("扫描失败：" + e.message, "error");
+      showToast("Scan failed: " + e.message, "error");
     } finally {
       btnScan.classList.remove("loading");
       btnScan.disabled = false;
@@ -454,6 +501,7 @@
   }
 
   btnRefresh.addEventListener("click", refreshStatus);
+  if (btnResetG1) btnResetG1.addEventListener("click", resetGoogleOne);
   btnScan.addEventListener("click", scan);
   deviceSel.addEventListener("change", refreshStatus);
 
@@ -469,10 +517,10 @@
         method: "POST",
         body: JSON.stringify({ adb_path: path }),
       });
-      showToast(path ? "已保存 adb 路径" : "已清除 adb 路径", "success");
+      showToast(path ? "Saved custom adb path" : "Cleared custom adb path", "success");
       await refreshStatus();
     } catch (e) {
-      showToast("保存失败：" + e.message, "error");
+      showToast("Save failed: " + e.message, "error");
     } finally {
       btnSaveAdb.classList.remove("loading");
     }

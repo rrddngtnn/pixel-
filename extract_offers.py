@@ -181,25 +181,66 @@ def normalize_offer_url(url: str) -> str:
     return url
 
 
-def _clean_urls(urls: Iterable[str]) -> list[str]:
+def to_partner_url(url: str) -> str:
+    """Convert Google One public offer URLs to the partner-eft-onboard URL shape."""
+    if url.startswith(OFFER_URL_PREFIX):
+        return PARTNER_URL_PREFIX + url[len(OFFER_URL_PREFIX):]
+    return url
+
+
+def format_offer_url(url: str, url_format: str = "offer") -> list[str]:
+    """Return URL(s) formatted according to url_format ('offer', 'partner', or 'both')."""
+    offer_u = normalize_offer_url(url)
+    partner_u = to_partner_url(url)
+    if url_format == "partner":
+        return [partner_u]
+    if url_format == "both":
+        return [offer_u, partner_u] if offer_u != partner_u else [offer_u]
+    return [offer_u]
+
+
+def reset_google_one_session(serial: str | None = None) -> str:
+    """Force-stop and clear Google One app data on the rooted device between accounts."""
+    ensure_adb()
+    ensure_device(serial)
+    ensure_root(serial)
+    cmd = f"am force-stop {shlex.quote(PKG)} && pm clear {shlex.quote(PKG)}"
+    r = adb(["shell", "su", "-c", cmd], serial=serial, check=False)
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
+    if r.returncode != 0 or ("Success" not in out and out):
+        raise ExtractError(f"Failed to reset {PKG}: {out or r.returncode}")
+    return out or "Success"
+
+
+def _clean_urls(urls: Iterable[str], url_format: str = "offer") -> list[str]:
     cleaned: list[str] = []
     seen: set[str] = set()
-    for u in urls:
-        u = normalize_offer_url(u.rstrip(".,);:\"'"))
-        if u not in seen:
-            seen.add(u)
-            cleaned.append(u)
+    for raw in urls:
+        stripped = raw.rstrip(".,);:\"'")
+        for u in format_offer_url(stripped, url_format=url_format):
+            if u not in seen:
+                seen.add(u)
+                cleaned.append(u)
     return cleaned
 
 
-def extract_urls_from_bytes(data: bytes, pattern: re.Pattern[bytes]) -> list[str]:
+def extract_urls_from_bytes(
+    data: bytes,
+    pattern: re.Pattern[bytes],
+    url_format: str = "offer",
+) -> list[str]:
     return _clean_urls(
-        m.group(0).decode("utf-8", errors="replace")
-        for m in pattern.finditer(data)
+        (m.group(0).decode("utf-8", errors="replace") for m in pattern.finditer(data)),
+        url_format=url_format,
     )
 
 
-def scan_urls_on_device(serial: str | None, account: str, pattern: re.Pattern[bytes]) -> list[str] | None:
+def scan_urls_on_device(
+    serial: str | None,
+    account: str,
+    pattern: re.Pattern[bytes],
+    url_format: str = "offer",
+) -> list[str] | None:
     """Fast path: scan the root-owned cache DB on-device and return only matching URL strings.
 
     Pulling the whole DB over adb is much slower than letting Android's toybox
@@ -219,10 +260,14 @@ def scan_urls_on_device(serial: str | None, account: str, pattern: re.Pattern[by
     if r.returncode != 0:
         err = ((r.stderr or "") + (r.stdout or "")).strip()
         raise ExtractError(f"On-device scan failed: {err}")
-    return extract_urls_from_bytes(out.encode("utf-8", errors="replace"), pattern)
+    return extract_urls_from_bytes(out.encode("utf-8", errors="replace"), pattern, url_format=url_format)
 
 
-def extract_urls_from_db(db_path: Path, pattern: re.Pattern[bytes]) -> list[str]:
+def extract_urls_from_db(
+    db_path: Path,
+    pattern: re.Pattern[bytes],
+    url_format: str = "offer",
+) -> list[str]:
     """Scan all TEXT/BLOB values for URLs. Values are usually proto-serialized, so regex on raw bytes is most reliable."""
     urls: list[str] = []
 
@@ -249,7 +294,7 @@ def extract_urls_from_db(db_path: Path, pattern: re.Pattern[bytes]) -> list[str]
     for m in pattern.finditer(data):
         urls.append(m.group(0).decode("utf-8", errors="replace"))
 
-    return _clean_urls(urls)
+    return _clean_urls(urls, url_format=url_format)
 
 
 def main() -> int:
@@ -260,6 +305,10 @@ def main() -> int:
     ap.add_argument("--all-urls", action="store_true", help="match any https://one.google.com/... url")
     ap.add_argument("--all-accounts", action="store_true",
                     help="scan every numbered account folder (default: only the newest, which is where the cache lives)")
+    ap.add_argument("--format", choices=("offer", "partner", "both"), default="both",
+                    help="output URL shape: 'offer' (/offer/...), 'partner' (/partner-eft-onboard/...), or 'both' (default: both)")
+    ap.add_argument("--reset-google-one", action="store_true",
+                    help="force-stop and clear Google One app data on the device (useful after extracting an account)")
     ap.add_argument("--out-dir", default=None, help="directory to place pulled db files (default: temp)")
     ap.add_argument("--pull-db", action="store_true",
                     help="force the old adb-pull + local sqlite/raw scan path (slower, useful for debugging)")
@@ -272,6 +321,10 @@ def main() -> int:
         ensure_adb()
         ensure_device(args.serial)
         ensure_root(args.serial)
+        if args.reset_google_one:
+            msg = reset_google_one_session(args.serial)
+            print(f"[+] Reset {PKG}: {msg}")
+            return 0
     except ExtractError as e:
         sys.exit(str(e))
 
@@ -313,10 +366,10 @@ def main() -> int:
                 if not db:
                     print(f"[-] account {acc}: no cache db")
                     continue
-                urls = extract_urls_from_db(db, pattern)
+                urls = extract_urls_from_db(db, pattern, url_format=args.format)
             else:
                 try:
-                    urls = scan_urls_on_device(args.serial, acc, pattern)
+                    urls = scan_urls_on_device(args.serial, acc, pattern, url_format=args.format)
                 except ExtractError as e:
                     print(f"[!] account {acc}: fast scan failed; falling back to adb pull ({e})", file=sys.stderr)
                     if workdir is None:
@@ -326,7 +379,7 @@ def main() -> int:
                     if not db:
                         print(f"[-] account {acc}: no cache db")
                         continue
-                    urls = extract_urls_from_db(db, pattern)
+                    urls = extract_urls_from_db(db, pattern, url_format=args.format)
                 if urls is None:
                     print(f"[-] account {acc}: no cache db")
                     continue

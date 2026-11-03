@@ -1,158 +1,142 @@
-# Google One 合作商优惠链接提取工具
+# Google One Partner Offer Extractor
 
-从已 root 的 Pixel 手机里，把 Google One 的 partner-offer 领取链接批量提取出来，
-并统一转换为 `https://one.google.com/offer/...` 格式。
+🔥 Extract Google One partner-offer redemption links directly from a rooted Pixel (or Pixel-spoofed device) and automate browser claiming with OAuth session exchange and Closure UI patching.
 
-缓存文件位置：
+Cache database path on the device:
 
-```
+```text
 /data/user/0/com.google.android.apps.subscriptions.red/files/accounts/<id>/SqliteKeyValueCache:PartnerOfferEligibilityCache.db
 ```
 
-文件名里有 `:`，Windows 不能直接保存。需要完整拉库调试时，脚本会先复制到
-`/sdcard/` 再 `adb pull` 下来；默认快扫不拉完整 DB。
+Because the database filename contains `:`, Windows cannot save it directly by its original name. When full database pulling is enabled for inspection, the tool stages a copy under `/sdcard/` before running `adb pull`; by default, fast on-device scanning reads matching strings directly without pulling the entire SQLite file.
 
-## 前置条件
+## What's Updated in This Fork
 
-- Python 3.8+
-- `adb`（Android platform-tools）。三种方式任选：
-  1. **加到系统 PATH**（永久）：`setx PATH "%PATH%;C:\path\to\platform-tools"`，重开终端
-  2. **只给当前会话**：PowerShell 里 `$env:Path += ";C:\path\to\platform-tools"`
-  3. **不改 PATH**：设环境变量 `ADB_PATH` 指到 `adb.exe`，或在 Web UI 的「设置」里填路径（会存到 `.settings.json`，下次自动加载）
-- 手机：
-  - 已 root（Magisk / KernelSU），并且在管理器里允许 **Shell** 使用 root
-  - 已开 USB 调试并授权这台电脑
-  - Google One App 已登录，最好先打开一次优惠页让缓存生成
+- 🔗 **Dual URL Format Support (`/offer/` & `/partner-eft-onboard/`)**: `extract_offers.py` now supports `--format {offer,partner,both}` (defaulting to `both`), and the Web UI provides dedicated **Copy /offer/** and **Copy EFT** buttons per link.
+- ♻️ **Automatic Partner EFT Fallback**: `auto_claim.py` automatically switches between `https://one.google.com/offer/<token>` and `https://one.google.com/partner-eft-onboard/<token>` when the initial landing page fails to initialize or has an unresponsive CTA.
+- 🖥️ **Cross-Platform Headless-Ready 50% Zoom**: Replaced the Windows-only `ctypes.windll.user32.SendInput` mouse wheel hijack with cross-platform CSS/DOM zoom (`document.documentElement.style.zoom = '0.5'`) and a `1440x1600` viewport (retaining `--native-win-zoom` as an optional fallback).
+- 🛠️ **Cross-Platform OAuth Helper APK Builder**: Updated `oauth_helper/build_oauth_helper.py` to resolve JDK and Android SDK Build-Tools binaries across Linux, macOS, and Windows instead of hardcoding `.exe`/`.bat` paths.
+- 🧹 **One-Click Google One Session Reset**: Added `--reset-google-one` in `extract_offers.py` and a **Reset Google One** button (`/api/reset-google-one`) in the Web UI to run `am force-stop` and `pm clear com.google.android.apps.subscriptions.red` between accounts.
+- 🌐 **Full English Interface**: Translated the Flask Web UI, frontend status logs, and CLI output from Chinese to English.
 
-## 使用方式一：Web UI（推荐）
+## Prerequisites
 
-```powershell
+- 🐍 **Python 3.8+** with `pip`
+- 🔌 **`adb` (Android SDK Platform-Tools)** configured via one of three methods:
+  1. **System PATH (permanent)**: Add `platform-tools` to your OS `PATH`.
+  2. **Environment variable**: Set `ADB_PATH` to the full path of `adb` / `adb.exe`.
+  3. **Web UI Settings**: Enter the `adb` binary path in the Web UI Settings panel (persisted in `.settings.json`).
+- 📱 **Rooted Android Device (or Rooted AVD)**:
+  - Rooted with **Magisk**, **KernelSU**, or **APatch**, with Superuser permission granted to **Shell** (`com.android.shell`).
+  - USB debugging enabled and authorized for your computer.
+  - Signed into the **Google One** app (`com.google.android.apps.subscriptions.red`) and opened at least once so the eligibility cache is populated.
+
+## Option 1: Web UI
+
+```bash
 pip install -r requirements.txt
+playwright install chromium
 python app.py
 ```
 
-启动后会自动打开 [http://127.0.0.1:7373](http://127.0.0.1:7373) 。界面里能：
+The server starts at [http://127.0.0.1:7373](http://127.0.0.1:7373) and opens your browser automatically:
 
-- 查看 adb / 设备 / root 状态徽章
-- 多设备时下拉选择要操作的序列号
-- 一键「扫描链接」，结果按账户分组列出
-- 每条链接支持「复制」和「在默认浏览器打开」
-- 「准备 Chrome」会在手机端打开 Chrome 并自动点已有账号授权，再刷新网页登录 token
-- 每条 offer 链接支持「自动领取」，会在本机 Chrome 注入登录 Cookie、把页面缩放到 50% 后打开
-- 勾选 **匹配所有 one.google.com 链接** 可以放宽匹配
+- 🔍 Inspect live `adb`, `device`, and `root` status badges and switch between connected device serials.
+- 📦 Click **Scan Offer Links** to list extracted links grouped by account directory, with one-click **Copy /offer/**, **Copy EFT**, **Open**, and **Auto Claim** actions.
+- 🔑 Click **Prime Chrome** to open mobile Chrome on the phone, click through account sign-in prompts, and refresh cached `OAuthLogin` tokens.
+- ⚡ Click **Reset Google One** after finishing an account to clear Google One app data before signing into the next account.
 
-## 使用方式二：命令行
+## Option 2: Command Line
 
-```powershell
-# 最常用：打印所有 offer 链接
+```bash
+# Default: print both /offer/ and /partner-eft-onboard/ links for the newest account directory
 python extract_offers.py
 
-# 多设备时指定序列号
+# Output only /offer/ or only /partner-eft-onboard/ URLs
+python extract_offers.py --format offer
+python extract_offers.py --format partner
+
+# Target a specific device serial when multiple phones/emulators are connected
 python extract_offers.py --serial 1A2B3C4D
 
-# 放宽匹配（任意 one.google.com 链接）
+# Widen matching to all https://one.google.com/... URLs
 python extract_offers.py --all-urls
 
-# 保留拉下来的 db 文件方便自己分析
-python extract_offers.py --keep --out-dir .\dbs
+# Keep pulled SQLite cache files on disk for local inspection
+python extract_offers.py --keep --out-dir ./dbs
 
-# 强制使用旧的 adb pull + 本地 SQLite/原始字节扫描方式
+# Force the full adb-pull + local SQLite/raw-byte scan path
 python extract_offers.py --pull-db
+
+# Force-stop and clear Google One app data on the device between accounts
+python extract_offers.py --reset-google-one
 ```
 
-默认会优先走快扫路径：在手机端用 `strings | grep one.google.com`
-只返回疑似包含链接的文本，再在本机用同一套正则精确提取。这样避免每次
-把整个缓存 DB 复制到 `/sdcard/` 再 `adb pull`。使用 `--keep`、`--out-dir`
-或 `--pull-db` 时会回到旧的完整 DB 拉取方式，方便排查。
+By default, `extract_offers.py` uses the fast on-device scan path (`strings -n 8 | grep one.google.com` over root shell) and applies regex extraction locally so the full SQLite file does not need to be copied over USB on every run.
 
-## 输出示例
+## Sample Output
 
-```
-[*] Found 1 account dir(s): 3f2a...
-[+] account 3f2a...: 2 url(s)
+```text
+[i] Scanning newest account dir only: 1 (use --all-accounts to scan all)
+[*] Found 1 account dir(s): 1
+[i] Using fast on-device scan (strings/grep, no DB pull)
+[+] account 1: 2 url(s)
 
 ============================================================
 Extracted links:
 ============================================================
 
-# account 3f2a...
-https://one.google.com/offer/XXXX?source=...
-https://one.google.com/offer/YYYY?source=...
+# account 1
+https://one.google.com/offer/XXXX
+https://one.google.com/partner-eft-onboard/XXXX
 ```
 
-把链接复制到浏览器（需要同 Google 账号登录态）就能走领取流程。
+✅ Copy either link into a browser signed into the same Google account, or run `auto_claim.py` to mint web cookies from the phone's `OAuthLogin` token automatically.
 
-## 自动领取
+## Automated Claiming
 
-Web UI 里推荐按这个顺序用：
+Recommended Web UI workflow:
 
-1. 点「准备 Chrome」。
-   脚本会在手机端打开 Chrome，自动点击已有账号登录/同意/继续按钮，然后刷新 token。
-2. 点「扫描链接」。
-   扫描到的 `partner-eft-onboard/...` 链接会统一转换为
-   `https://one.google.com/offer/...`。
-3. 点目标链接右侧的「自动领取」。
-   后台会启动 `auto_claim.py`，前端左侧会实时显示中文日志。
+1. Click **Prime Chrome** so the tool opens Chrome on the phone, accepts the account sign-in prompt, and refreshes `.tokens.json`.
+2. Click **Scan Offer Links** to list the extracted URLs for the active account.
+3. Click **Auto Claim** next to the target offer URL to launch `auto_claim.py` in the background and stream live progress logs in the UI.
 
-「刷新 tokens」会从手机 root 数据库里读取 Google 账号信息、Android ID 和 Chrome 已缓存的
-   `OAuthLogin` token。
+You can also run the token extractor and auto-claimer directly from the terminal:
 
-手机需要保持解锁。遇到验证码、密码、异常安全提示时不会处理，需要手动接管。
+```bash
+# 1. Pull master tokens, OAuthLogin tokens, and GSF Android ID into .tokens.json
+python extract_tokens.py --save
 
-「自动领取」的实际流程：
+# 2. Verify cookie minting via OAuthLogin -> MergeSession
+python google_auth.py
 
-1. 如果 `.tokens.json` 超过 45 分钟，会先自动从手机重新刷新 token。
-2. 用手机里的 `OAuthLogin` token 换取 Google 网页 Cookie。
-3. 启动本机系统 Chrome 的隔离上下文，注入 Cookie。
-4. 只打开原始优惠链接，不跳其他中转页。
-5. 到达 `one.google.com/offer/...` 后，使用真实 Chrome 浏览器缩放把页面调到 50%。
-   这是系统级 `Ctrl + 鼠标滚轮向下`，效果和手动点地址栏右侧缩放菜单一致。
-6. 等 Google One 核心 UI 出现后注入修复脚本，处理
-   `window.default_SubscriptionsManagementUi` 和 `[jscontroller="ytxTId"]`。
-7. 如果勾选了「自动点领取」，会尝试点击 `Start trial` / `Accept` / `Claim` /
-   `Continue` / `Subscribe` 等按钮；否则保持 Chrome 打开，手动点。
-
-命令行也可以直接跑：
-
-```powershell
-python auto_claim.py --url "https://one.google.com/offer/XXXX"
-
-# 指定设备，并在 token 过期时自动刷新、badauth 时重试一次
-python auto_claim.py --url "https://one.google.com/offer/XXXX" --serial 1A2B3C4D --refresh-stale-tokens --retry-badauth
-
-# 尝试自动点击领取按钮
+# 3. Launch Chromium with injected cookies, patch the Google One UI, and auto-click Claim
 python auto_claim.py --url "https://one.google.com/offer/XXXX" --auto-click
+
+# Refresh stale tokens (>45m) automatically and retry once on badauth
+python auto_claim.py --url "https://one.google.com/offer/XXXX" --serial 1A2B3C4D --refresh-stale-tokens --retry-badauth --auto-click
+
+# Run headless
+python auto_claim.py --url "https://one.google.com/offer/XXXX" --headless --auto-click
 ```
 
-注意：50% 缩放依赖 Windows 系统级输入，所以只在可见 Chrome 窗口里执行；
-`--headless` 模式会跳过这个缩放步骤。自动领取启动时不要立刻把 Chrome 最小化。
+How `auto_claim.py` works under the hood:
 
-## 原理
+1. Refreshes `.tokens.json` from the phone if the file is older than 45 minutes (when `--refresh-stale-tokens` is enabled).
+2. Exchanges the phone's `ya29.m.*` `OAuthLogin` token at `accounts.google.com/OAuthLogin?source=ChromiumBrowser&issueuberauth=1` for a single-use `uberauth` token, then hits `accounts.google.com/MergeSession` to mint authenticated `.google.com` cookies (`SID`, `HSID`, `SSID`, `APISID`, `SAPISID`, `__Secure-1PSID`, `__Secure-3PSID`).
+3. Launches an isolated Chromium context (`1440x1600`), injects the cookies, and navigates directly to the offer URL.
+4. Applies 50% CSS/DOM zoom (`document.documentElement.style.zoom = '0.5'`) and patches `window.default_SubscriptionsManagementUi.sxa` across `[jscontroller="ytxTId"]` nodes so unresponsive Google One trial buttons become clickable.
+5. Automatically falls back between `/offer/<token>` and `/partner-eft-onboard/<token>` if the initial URL fails to ready its controller nodes or has no clickable CTA.
 
-该 db 是 Google 内部的 `SqliteKeyValueCache` —— 一个 key/value 表，
-value 是 protobuf 序列化的字节。默认快扫做两步：
+## Troubleshooting
 
-1. 在手机端对缓存 DB 跑 `strings | grep one.google.com`，只把疑似包含链接的文本传回本机。
-2. 本机再用正则从这些文本里精确提取 URL。
+- **`Root (su) is not available`**: Open Magisk, KernelSU, or APatch manager and grant Superuser access to `Shell` (`com.android.shell`).
+- **`No accounts found`**: Sign into the Google One app (`com.google.android.apps.subscriptions.red`) on the phone and open the Benefits/Offers tab once so the SQLite cache is written.
+- **No matching links found**: The eligibility cache may not have populated yet, or the device environment did not pass Pixel hardware/integrity checks. Refresh the Google One app or run `python extract_offers.py --all-urls` to inspect all cached `one.google.com` URLs.
+- **`OAuthLogin returned HTTP 403 / badauth`**: The cached `OAuthLogin` token on the phone has expired (~1 hour lifetime). Click **Prime Chrome** or **Refresh Tokens** in the Web UI, or pass `--refresh-stale-tokens --retry-badauth` to `auto_claim.py`.
+- **Browser redirects to Google Sign-In**: The cookies were rejected or the account was not authorized in mobile Chrome. Run **Prime Chrome** on an unlocked phone screen first, then retry.
 
-如果加 `--pull-db`、`--keep` 或 `--out-dir`，会走旧的完整扫描：
+## Credits
 
-1. 用 `sqlite3` 只读打开，遍历所有表所有列，把 BLOB/TEXT 值里匹配正则的 URL 抽出来。
-2. 再对整个文件做一遍原始字节正则，兜底未提交到主文件的 WAL/free page 里的数据。
-
-最后去重按账号分组打印。
-
-## 常见问题
-
-- `**Root (su) is not available**`：打开 Magisk，超级用户里给 `Shell` 授权。
-- `**No accounts found**`：先打开 Google One 登录一下，或确认包名没变
-（部分机型上是 `com.google.android.apps.subscriptions.red`）。
-- **没匹配到链接**：可能缓存还没下发。在 App 里点一下「优惠 / Offers」
-页刷一次，再跑脚本；或用 `--all-urls` 看看里面都有什么。
-- **`OAuthLogin returned HTTP 403 / badauth`**：手机里的 OAuthLogin token 过期。
-  Web UI 自动领取会先刷新旧 token，遇到 `badauth` 也会重试一次；如果仍失败，
-  再点一次「准备 Chrome」，让手机端 Chrome 完成账号授权。
-- **自动领取跳到 Google 登录页**：说明 Cookie 没被 Google One 接受。通常是 token
-  太旧、手机 Chrome 授权没完成，或选错了设备/账号。先「准备 Chrome」，再重新点自动领取。
-- **优惠页看不全**：正常流程会在打开优惠页后把 Chrome 真实缩放到 50%。如果没有变成 50%，
-  保持自动化 Chrome 在前台重试；临时手动方案是在 Chrome 里按 `Ctrl` + 鼠标滚轮向下调到 50%。
+- Original project and core extraction/OAuth architecture by [mxysw](https://github.com/mxysw/pixel-).
+- Updated and maintained in this fork by [rrddngtnn](https://github.com/rrddngtnn/pixel-) with English localization, dual `/offer/` & `/partner-eft-onboard/` URL extraction and automatic fallback, cross-platform headless CSS zoom, cross-platform `oauth_helper` APK building, and Google One session reset tooling.

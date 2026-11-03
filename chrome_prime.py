@@ -21,16 +21,6 @@ POSITIVE_PATTERNS = [
     r"accept",
     r"allow",
     r"got it",
-    r"继续",
-    r"以.*身份继续",
-    r"登录",
-    r"登入",
-    r"使用.*账号",
-    r"同意",
-    r"我同意",
-    r"接受",
-    r"允许",
-    r"知道了",
 ]
 
 PRIORITY_RESOURCE_IDS = [
@@ -43,9 +33,6 @@ NEGATIVE_PATTERNS = [
     r"no thanks",
     r"not now",
     r"skip",
-    r"不用了",
-    r"暂不",
-    r"跳过",
 ]
 
 
